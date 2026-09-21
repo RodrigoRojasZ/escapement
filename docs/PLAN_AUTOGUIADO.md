@@ -161,14 +161,15 @@ la siguiente: si la sesión se corta, lo cerrado queda cerrado.
 Depende de E4.1 sólo en lo práctico (correr la suite desatendida sin que el journal ni los prompts
 estorben), no en el código.
 
-**E4.3 · Continuidad del worktree en el carril target — pendiente**
+**E4.3 · Continuidad del worktree en el carril target — ✅ completada (2026-09-21)**
 
-| Ítem | Deuda | Done verificable |
-|---|---|---|
-| `_h_editar` con `target` debe editar el worktree del plan, no el repo real | #11 | un paso con target deja sus cambios en `plan.workdir`; el repo real no se toca |
+| Ítem | Deuda | Done verificable | Estado |
+|---|---|---|---|
+| `_h_editar` con `target` debe editar el worktree del plan, no el repo real | #11 | un paso con target deja sus cambios en `plan.workdir`; el repo real no se toca | ✅ 5 tests (3 fallan sin el parche); `_fijar_avance` → `optimize(worktree, make_pr=False)` → `merge --ff-only` |
 
-Es la de más riesgo de las que destapó E2 (toca el aislamiento S2), así que va sola y al final:
-con E4.2 cerrada es la **única** deuda abierta del repo.
+Era la de más riesgo de las que destapó E2 (toca el aislamiento S2), así que fue sola y al final.
+Con ella cerrada, **E4 está completa y no quedan deudas abiertas en DEUDAS.md**: lo que sigue es
+E3, y su primera corrida en real será la que destape las deudas de la próxima tanda.
 
 ### E3 · Ciclo auto-guiado — innovación
 
@@ -190,7 +191,7 @@ La innovación es apuntarlo hacia adentro:
 
 | Métrica | Fuente | Hoy | Meta |
 |---|---|---|---|
-| Deudas abiertas en DEUDAS.md | el propio doc | 1 tras E4.2: #11 (eran 4 tras E4.1; 5 tras E0: #4 #6 #7 #8 #10) | tendencia a la baja, edad < 1 mes |
+| Deudas abiertas en DEUDAS.md | el propio doc | **0** tras E4.3 (1 tras E4.2: #11; 4 tras E4.1; 5 tras E0: #4 #6 #7 #8 #10) | tendencia a la baja, edad < 1 mes |
 | Docs sin marca de vigencia | `docs/` | 0 tras E0 | 0 |
 | Planes cerrados por criterio (vs conteo) | topics `plan.eval` | 0% (no existe) | 100% post-E2 |
 | PRs con check de CI | GitHub | 0% (no hay CI) | 100% post-E1 |

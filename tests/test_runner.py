@@ -1,5 +1,7 @@
 """Tests del runner del roadmap (Fase B): orden topológico, checkpoints, reanudación. Sin efectos."""
 
+from pathlib import Path
+
 import pytest
 
 from agent import runner
@@ -667,6 +669,138 @@ def _repo_con_commit(tmp_path):
     _git(tmp_path, "add", "base.py")
     _git(tmp_path, "commit", "-m", "init")
     return tmp_path
+
+
+# --- Deuda #11: el carril `target` de editar corre sobre el worktree del plan, no el repo real ---
+
+_UTILS = "def f():\n    return 1\n"
+
+
+def _repo_plan(tmp_path):
+    """Repo git con identidad propia (CI no tiene una global) y el worktree del plan montado."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@t.co")
+    _git(repo, "config", "user.name", "tester")
+    (repo / "utils.py").write_text(_UTILS, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "base")
+    plan = Plan("objetivo", "criterio", [Step(1, "documenta utils.py", "editar", "d", [])])
+    plan.repo = str(repo)
+    wt = runner._worktree_plan(plan, str(repo))
+    assert wt  # sin worktree el test no prueba nada
+    return repo, plan, Path(wt)
+
+
+def _fake_optimize(capturado, tmp_path, *, verified=True, desde_el_inicio=False):
+    """Imita a ``optimize``: deja el refactor commiteado en una rama propia y devuelve su Result."""
+    from agent.orchestrator import Result
+
+    def _fake(repo, directiva, target, **kw):
+        repo = Path(repo)
+        capturado["repo"] = str(repo)
+        capturado["kw"] = kw
+        capturado["target_visto"] = (repo / target).read_text(encoding="utf-8")
+        rama = "escapement/optimiza-utils-20260920-000000"
+        if verified:
+            tmp = tmp_path / "wt-optimize"
+            base = ["HEAD~1"] if desde_el_inicio else []
+            _git(repo, "worktree", "add", "-b", rama, str(tmp), *base)
+            (tmp / target).write_text(
+                '"""Docstring del refactor."""\n' + (tmp / target).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            _git(tmp, "add", "-A")
+            _git(tmp, "commit", "-m", "escapement: docstrings")
+            _git(repo, "worktree", "remove", "--force", str(tmp))
+        return Result(
+            branch=rama,
+            dispatched=True,
+            tests_ok=verified,
+            verified=verified,
+            verdict="tests OK" if verified else "tests ROTOS: 2 fallando",
+            diff_stat="",
+            summary="",
+            pr_url="https://github.com/x/y/pull/1" if verified else None,
+        )
+
+    return _fake
+
+
+def test_editar_target_optimiza_sobre_el_worktree_y_trae_el_cambio(monkeypatch, tmp_path):
+    # El fallo de E2: optimize corría sobre el repo real, así que el paso ni veía lo que editaron
+    # los pasos previos ni dejaba nada que los siguientes pudieran ver.
+    repo, plan, wt = _repo_plan(tmp_path)
+    (wt / "utils.py").write_text(_UTILS + "\n\ndef g():\n    return 2\n", encoding="utf-8")
+    capturado = {}
+    monkeypatch.setattr(
+        "agent.orchestrator.optimize", _fake_optimize(capturado, tmp_path)
+    )
+
+    estado, nota = runner._h_editar(plan.pasos[0], plan, str(repo))
+
+    assert estado == HECHO
+    assert capturado["repo"] == str(wt)  # el worktree del plan, no el repo real
+    assert capturado["kw"]["make_pr"] is False  # la entrega del plan es traspasar_a_rama
+    assert "def g" in capturado["target_visto"]  # vio la edición sin commitear del paso previo
+    final = (wt / "utils.py").read_text(encoding="utf-8")
+    assert "Docstring del refactor" in final and "def g" in final  # y el cambio aterrizó aquí
+    assert "escapement/optimiza-utils-20260920-000000" in nota
+
+
+def test_editar_target_sin_worktree_del_plan_conserva_el_carril_con_pr(monkeypatch, tmp_path):
+    repo = _repo_con_commit(tmp_path)
+    plan = Plan("objetivo", "criterio", [Step(1, "documenta base.py", "editar", "d", [])])
+    capturado = {}
+    monkeypatch.setattr(
+        "agent.orchestrator.optimize", _fake_optimize(capturado, tmp_path, verified=False)
+    )
+
+    estado, nota = runner._h_editar(plan.pasos[0], plan, str(repo))
+
+    assert capturado["repo"] == str(repo)  # sin worktree no hay continuidad que preservar
+    assert "make_pr" not in capturado["kw"]  # y el PR de optimize sigue siendo su entrega
+    assert (estado, nota) == (runner.FALLIDO, "tests ROTOS: 2 fallando")
+
+
+def test_editar_target_no_verificado_deja_el_worktree_intacto(monkeypatch, tmp_path):
+    repo, plan, wt = _repo_plan(tmp_path)
+    capturado = {}
+    monkeypatch.setattr(
+        "agent.orchestrator.optimize", _fake_optimize(capturado, tmp_path, verified=False)
+    )
+
+    estado, nota = runner._h_editar(plan.pasos[0], plan, str(repo))
+
+    assert (estado, nota) == (runner.FALLIDO, "tests ROTOS: 2 fallando")
+    assert (wt / "utils.py").read_text(encoding="utf-8") == _UTILS  # nada se aplicó
+
+
+def test_editar_target_reporta_la_rama_si_el_cambio_no_entra(monkeypatch, tmp_path):
+    # Rama divergente (no descendiente del HEAD del plan): el ff-merge falla y el veredicto no
+    # puede ser HECHO — pero el trabajo existe, así que la nota tiene que decir dónde.
+    repo, plan, wt = _repo_plan(tmp_path)
+    (wt / "otro.py").write_text("y = 2\n", encoding="utf-8")  # avance que mueve el HEAD del plan
+    capturado = {}
+    monkeypatch.setattr(
+        "agent.orchestrator.optimize", _fake_optimize(capturado, tmp_path, desde_el_inicio=True)
+    )
+
+    estado, nota = runner._h_editar(plan.pasos[0], plan, str(repo))
+
+    assert estado == runner.FALLIDO
+    assert "escapement/optimiza-utils-20260920-000000" in nota  # dónde quedó el trabajo
+    assert "Docstring del refactor" not in (wt / "utils.py").read_text(encoding="utf-8")
+
+
+def test_fijar_avance_commitea_una_sola_vez(tmp_path):
+    repo, plan, wt = _repo_plan(tmp_path)
+    (wt / "nuevo.py").write_text("x = 1\n", encoding="utf-8")
+    assert runner._fijar_avance(str(wt), plan) == (True, "")
+    assert runner._git_run(str(wt), "status", "--porcelain").strip() == ""
+    assert runner._fijar_avance(str(wt), plan) == (True, "")  # sin nada pendiente, no-op
+    assert runner._fijar_avance(str(tmp_path / "no-git"), plan)[0] is False
 
 
 def test_git_status_sensible_al_contenido_de_untracked(tmp_path):
