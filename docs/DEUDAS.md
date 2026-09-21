@@ -1,8 +1,8 @@
 # Deudas técnicas de Escapement — 2026-07-31
 
 > **Estado: vigente** — única lista viva de deudas del repo. Última revisión: 2026-09-20 (Etapa
-> E4.2 del [plan auto-guiado](PLAN_AUTOGUIADO.md): cerradas **#17** (commit `4954776`) y **#12**
-> (commits `ef65edd` + tests). Deudas abiertas: **#11 y #13**. Antes: 2026-09-20 (E4.1: cerradas
+> E4.2 del [plan auto-guiado](PLAN_AUTOGUIADO.md) **completada**: cerradas **#17**, **#12** y
+> **#13**. Deuda abierta: **#11** (única, y es la de E4.3). Antes: 2026-09-20 (E4.1: cerradas
 > **#14, #15 y #16** en el commit `b5aed66`). Antes: 2026-08-28 (Etapa 2
 > del [plan auto-guiado](PLAN_AUTOGUIADO.md) **completada**: cerrada #7 — ciclo
 > evaluar→replanificar entregado en PRs #10/#11/#12 y validado en real; alta de #11–#17, hallazgos
@@ -379,10 +379,13 @@ en `test_executors.py`, 6 del hook en `test_guard.py`, 4 de `_h_verificar`/`_hue
 parche — los 2 que no son los que fijan que el default sigue siendo no-op. Suite completa: 912
 pasando.
 
-### 13. `_insertar_pasos` no valida `tipo` ni calidad mínima de los pasos de la auto-evolución
+### 13. `_insertar_pasos` no valida `tipo` ni calidad mínima de los pasos de la auto-evolución — ✅ cerrada (2026-09-20)
 
 **Impacto: medio · Esfuerzo: bajo** · *Registrada el 2026-08-28: hallazgo de la validación en real
 de E2 (deuda #7).*
+
+> **Cerrada.** El `tipo` desconocido se coerce a `investigar` y la acción que no da para un
+> dispatch se descarta. Detalle abajo, después del diagnóstico original.
 
 `_insertar_pasos` ([runner.py:943](../src/agent/runner.py#L943)) solo descarta `reflexionar`
 (anti-bucle) y duplicados; acepta cualquier otro `tipo` y cualquier `accion`. Un tipo que no está
@@ -397,6 +400,26 @@ bloqueado y hubo que quitar los cuatro a mano con `escapement plan quitar`.
 **Arreglo propuesto:** whitelist de tipos (las claves de los handlers) con descarte o coerción a
 `investigar`, y un umbral mínimo para `accion` (p. ej. largo mínimo y distinta del propio tipo).
 Aplica igual a los pasos que llegan por replanificación (#7), que entran por la misma función.
+
+**Arreglo aplicado (2026-09-20, E4.2):** dos guardas nuevas en
+[`_insertar_pasos`](../src/agent/runner.py), después del anti-bucle de `reflexionar` y antes del
+anti-duplicados, así que cubren por igual a la auto-evolución y a la replanificación (entran por
+la misma función). Tratan distinto los dos defectos porque no son el mismo problema:
+
+- **`tipo` desconocido → se coerce a `investigar`** (no se descarta): la tarea que propuso el
+  modelo puede ser buena y solo estar mal etiquetada, e `investigar` es el tipo seguro —no edita
+  nada—. Lo que se elimina es el paso `bloqueado` por `_h_desconocido` que frenaba en seco una
+  corrida desatendida (`editorificar`, `refactor`).
+- **`accion` inservible → se descarta** el paso entero: más corta que `_ACCION_MIN` (8) o igual al
+  nombre pelado de un tipo, ignorando puntuación (el `[verificar] verificar` de la validación).
+  Ahí no hay nada que corregir sin inventar la tarea.
+
+**Limitación conocida:** la whitelist es la de `DEFAULT_HANDLERS`; un `run_plan(..., handlers=...)`
+con tipos propios los verá coercidos, porque esta función no recibe el mapa de handlers efectivo
+(queda documentado en su docstring). **Verificación:** 3 tests nuevos en `test_runner.py` —uno de
+ellos replica la tanda de 4 pasos basura que hubo que quitar a mano en el escenario 1 y comprueba
+que ahora sobreviven 3, todos con un tipo que sí tiene handler—; los 3 fallan sin el parche. Suite
+completa: 915 pasando, `ruff` limpio.
 
 ### 17. El guard de efecto en disco es ciego al contenido de archivos untracked — ✅ cerrada (2026-09-20)
 

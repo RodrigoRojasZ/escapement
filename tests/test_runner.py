@@ -482,6 +482,50 @@ def test_insertar_pasos_ids_deps_y_anti_bucle():
     assert nuevo.id == 2 and nuevo.depende_de == [1] and nuevo.tipo == "editar"
 
 
+# --- Deuda #13: lo que propone el modelo se sanea antes de entrar al plan ---
+
+
+def test_insertar_pasos_coerce_el_tipo_desconocido_a_investigar():
+    # un typo del modelo no puede frenar la corrida en _h_desconocido -> bloqueado
+    p = Plan("o", "g", [Step(1, "reflexiona", "reflexionar", "d", [])])
+    n = runner._insertar_pasos(
+        p, p.pasos[0], [{"accion": "editar el worker de colas", "tipo": "editorificar", "done": "d"}]
+    )
+    assert n == 1 and p.pasos[1].tipo == "investigar"
+    assert p.pasos[1].accion == "editar el worker de colas"  # la tarea se conserva tal cual
+
+
+def test_insertar_pasos_descarta_la_accion_que_no_da_para_un_dispatch():
+    p = Plan("o", "g", [Step(1, "reflexiona", "reflexionar", "d", [])])
+    n = runner._insertar_pasos(
+        p,
+        p.pasos[0],
+        [
+            {"accion": "verificar", "tipo": "verificar", "done": "d"},  # el nombre pelado del tipo
+            {"accion": "Investigar.", "tipo": "investigar", "done": "d"},  # idem con ruido
+            {"accion": "hazlo", "tipo": "editar", "done": "d"},  # más corta que _ACCION_MIN
+        ],
+    )
+    assert n == 0 and len(p.pasos) == 1  # nada que corregir sin inventar la tarea: se descartan
+
+
+def test_insertar_pasos_sanea_la_tanda_basura_de_la_validacion_e2():
+    # Los 4 pasos reales que la auto-evolución insertó en el escenario 1 y hubo que quitar a mano.
+    p = Plan("o", "g", [Step(1, "reflexiona", "reflexionar", "d", [])])
+    n = runner._insertar_pasos(
+        p,
+        p.pasos[0],
+        [
+            {"accion": "revisar el estado del repo", "tipo": "investigar", "done": "d"},
+            {"accion": "documentar los helpers de utils", "tipo": "editorificar", "done": "d"},
+            {"accion": "verificar", "tipo": "verificar", "done": "d"},
+            {"accion": "limpiar duplicados de config", "tipo": "refactor", "done": "d"},
+        ],
+    )
+    assert n == 3  # sobrevive todo menos el que no tenía acción
+    assert all(s.tipo in runner.DEFAULT_HANDLERS for s in p.pasos[1:])  # ninguno cae en bloqueado
+
+
 def test_reflexionar_anade_pasos_al_plan(monkeypatch):
     j = '{"pasos": [{"accion": "arreglar el bug G3", "tipo": "editar", "done": "el test pasa"}]}'
     monkeypatch.setattr(runner.executors, "run_agent", lambda *a, **k: (True, j))

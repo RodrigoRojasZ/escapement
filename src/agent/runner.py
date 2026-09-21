@@ -1139,10 +1139,24 @@ def _json_tiene_lista(out: str, clave: str) -> bool:
     return isinstance(data, dict) and isinstance(data.get(clave), list)
 
 
+_ACCION_MIN = 8  # caracteres mínimos de una acción generada (deuda #13)
+
+
 def _insertar_pasos(plan: Plan, tras: Step, nuevos: list[dict]) -> int:
     """Añade pasos nuevos al plan con ids únicos, dependientes de ``tras`` (corren después de él).
 
     Descarta pasos 'reflexionar' generados (evita el bucle de re-planning infinito).
+
+    Deuda #13: lo que llega aquí lo escribió un modelo (auto-evolución y replanificación entran
+    por la misma puerta), así que además se sanea. El ``tipo`` se contrasta contra
+    :data:`DEFAULT_HANDLERS` y un desconocido se **coerce** a ``investigar`` en vez de colarse: sin
+    esto acababa en :func:`_h_desconocido` -> paso ``bloqueado``, y una corrida desatendida se
+    frenaba en seco por un typo del modelo (en la validación de E2 entraron ``editorificar`` y
+    ``refactor``). La ``accion`` en cambio se **descarta** si no da para un dispatch —muy corta, o
+    el nombre pelado de un tipo, como el ``[verificar] verificar`` de esa misma corrida—: ahí no
+    hay nada que corregir sin inventar la tarea. La whitelist es la de los handlers por defecto;
+    un ``run_plan(..., handlers=...)`` con tipos propios los verá coercidos (limitación conocida:
+    esta función no recibe el mapa de handlers efectivo).
     """
     max_id = max((s.id for s in plan.pasos), default=0)
     anadidos = 0
@@ -1150,8 +1164,12 @@ def _insertar_pasos(plan: Plan, tras: Step, nuevos: list[dict]) -> int:
         tipo = str(raw.get("tipo", "investigar")).strip().lower()
         if tipo == "reflexionar":
             continue
+        if tipo not in DEFAULT_HANDLERS:
+            tipo = "investigar"  # typo del modelo: investigar es el tipo seguro (no edita nada)
         accion = str(raw.get("accion", "")).strip()
         done = str(raw.get("done", "")).strip()
+        if len(accion) < _ACCION_MIN or accion.strip(" .:-").lower() in DEFAULT_HANDLERS:
+            continue  # ni un dispatch se puede armar con esto
         # F4: la auto-evolución vuelve a proponer pasos que ya existen en el plan (una reflexión
         # posterior redescubre lo mismo). Descartamos los que se solapan fuerte con un paso previo
         # para no re-ejecutar trabajo ya hecho ni inflar el roadmap con duplicados.
