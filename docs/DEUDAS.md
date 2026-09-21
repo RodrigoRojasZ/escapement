@@ -1,8 +1,9 @@
 # Deudas técnicas de Escapement — 2026-07-31
 
-> **Estado: vigente** — única lista viva de deudas del repo. Última revisión: 2026-09-20 (Etapa
-> E4.2 del [plan auto-guiado](PLAN_AUTOGUIADO.md) **completada**: cerradas **#17**, **#12** y
-> **#13**. Deuda abierta: **#11** (única, y es la de E4.3). Antes: 2026-09-20 (E4.1: cerradas
+> **Estado: vigente** — única lista viva de deudas del repo. Última revisión: 2026-09-21 (Etapa
+> E4.3 del [plan auto-guiado](PLAN_AUTOGUIADO.md) **completada**: cerrada **#11**. **Cero deudas
+> abiertas**; la lista queda como registro histórico hasta que la próxima validación en real
+> destape algo. Antes: 2026-09-20 (E4.2: cerradas **#17**, **#12** y **#13**). Antes: 2026-09-20 (E4.1: cerradas
 > **#14, #15 y #16** en el commit `b5aed66`). Antes: 2026-08-28 (Etapa 2
 > del [plan auto-guiado](PLAN_AUTOGUIADO.md) **completada**: cerrada #7 — ciclo
 > evaluar→replanificar entregado en PRs #10/#11/#12 y validado en real; alta de #11–#17, hallazgos
@@ -309,10 +310,13 @@ en el docstring de [bus.py](../src/agent/bus.py). Con esto las tres piezas de E2
 La validación destapó siete deudas nuevas (#11–#17, registradas en este archivo con su evidencia);
 ninguna bloquea el ciclo evaluar→replanificar, que se comportó según diseño en ambos escenarios.
 
-### 11. `_h_editar` con target edita el repo real, no el worktree del plan
+### 11. `_h_editar` con target edita el repo real, no el worktree del plan — ✅ cerrada (2026-09-21)
 
 **Impacto: alto · Esfuerzo: medio** · *Registrada el 2026-08-28: hallazgo de la validación en real
 de E2 (deuda #7).*
+
+> **Cerrada.** El carril `target` ahora despacha `optimize` **sobre el worktree del plan** y trae el
+> commit de vuelta con un `merge --ff-only`. Detalle abajo, después del diagnóstico original.
 
 `_h_editar` tiene dos carriles ([runner.py:736](../src/agent/runner.py#L736)): el autónomo corre en
 `_workdir(plan, repo)` — el worktree del plan que S2 montó justamente para la continuidad — pero el
@@ -331,6 +335,31 @@ honestamente contra el worktree y frenó la corrida en checkpoint — hubo que t
 **Arreglo propuesto:** que el carril target opere también sobre `_workdir(plan, repo)` (o que, tras
 el `optimize`, la rama resultante se fusione al worktree del plan antes de continuar). Mientras
 tanto, el carril target además usa `repo` sin validar — ver #16.
+
+**Arreglo aplicado (2026-09-21, E4.3):** el carril sale a su propia función,
+[`_editar_target`](../src/agent/runner.py), y hace las **dos** cosas del arreglo propuesto, porque
+ninguna sola alcanza. Pasarle el worktree a `optimize` no basta: `optimize` parte del **último
+commit**, y los pasos `editar` dejan su trabajo *sin commitear* en el worktree — le habría dado a
+revisar una versión vieja del target. La cadena es:
+
+1. **`_fijar_avance(work, plan)`** — extraído de `traspasar_a_rama`, que ya hacía exactamente esto y
+   ahora lo comparte sin duplicarlo: commitea como `escapement(wip): <objetivo>` lo que los pasos
+   anteriores dejaron pendiente, para que `optimize` vea el árbol al día.
+2. **`optimize(work, directiva, target, make_pr=False)`** — con el worktree como repo, así que su
+   rama `escapement/optimiza-…` nace de la rama del plan y el refactor sale verificado y juzgado.
+   Sin PR a propósito: la base sería la rama del plan, que no está en el remoto, y la entrega del
+   plan es `traspasar_a_rama`, no un PR por paso.
+3. **`merge --ff-only <rama>`** en el worktree — el ff siempre es posible (la rama salió del HEAD
+   que acabamos de fijar y trae un commit encima), y los pasos siguientes ya ven la edición.
+
+La rama de `optimize` **no se borra**: si el ff-merge fallara, ahí sigue vivo el trabajo, y la nota
+`FALLIDO` la nombra en vez de reportar un éxito vacío. Sin worktree del plan (repo no-git, o el
+montaje de S2 falló) se conserva el carril anterior —`optimize` sobre `repo`, con PR—: ahí no hay
+continuidad que preservar. **Verificación:** 5 tests nuevos en `test_runner.py`, 3 de ellos fallan
+sin el parche (el que replica el escenario 1 de E2 —el paso ve la edición sin commitear del paso
+previo y deja la suya en el worktree—, el del ff-merge imposible, y el de `_fijar_avance`); los
+otros 2 fijan el comportamiento que **no** cambia (carril sin worktree, con PR; y `optimize` no
+verificado deja el worktree intacto). Suite completa: 920 pasando, `ruff` limpio.
 
 ### 12. `_h_verificar` despacha con `mode="edit"`: el verificador puede escribir lo que verifica — ✅ cerrada (2026-09-20)
 
