@@ -182,6 +182,28 @@ def _huella_untracked(repo: str) -> str:
     return "\n".join(lineas)
 
 
+def _huella_tracked(repo: str) -> str | None:
+    """Huella del árbol SOLO de lo que git ya conoce: modificados y borrados, sin archivos nuevos.
+
+    Deuda #12: sirve para detectar que un paso de ``verificar`` TOCÓ el árbol que auditaba. Deja
+    fuera los untracked a propósito —al revés que :func:`_git_status`—: una verificación legítima
+    corre ``pytest`` y eso siembra ``.pytest_cache/`` y ``__pycache__/`` en cualquier repo que no los
+    ignore; contarlos como "el verificador escribió" frenaría corridas sanas. Lo que sí importa
+    —reescribir el código que se estaba revisando— es una modificación de algo TRACKED y sí se ve.
+
+    Args:
+        repo: carpeta del worktree donde corre el paso.
+
+    Returns:
+        ``porcelain_sin_untracked + "\\0" + diff``, o None si no es repo git (ahí no se compara nada
+        y ``verificar`` se comporta como antes).
+    """
+    porcelain = _git_run(repo, "status", "--porcelain", "--untracked-files=no")
+    if porcelain is None:
+        return None
+    return porcelain + "\0" + (_git_run(repo, "diff", "HEAD") or "")
+
+
 def _git_status(repo: str) -> str | None:
     """Huella del árbol de trabajo SENSIBLE AL CONTENIDO. None si no es repo git o git falla.
 
@@ -752,18 +774,39 @@ def _h_ejecutar(step: Step, plan: Plan, repo: str) -> tuple[str, str]:
 
 
 def _h_verificar(step: Step, plan: Plan, repo: str) -> tuple[str, str]:
+    """Verifica el ``done`` del paso SIN poder editar lo que audita (deuda #12).
+
+    Necesita shell —una verificación real corre ``pytest``, ``py_compile``, un script—, así que no
+    puede ir por ``mode="read"``. Lo que se cierra es la ESCRITURA, en dos capas: ``no_write=True``
+    le quita las tools de edición al dispatch, y como eso no cubre un ``echo > archivo`` por shell,
+    se compara la huella de lo tracked antes/después. Si el verificador modificó el árbol, el
+    veredicto no vale (en la validación de E2 uno escribió él mismo los docstrings que debía
+    revisar y reportó ``verificado``): el paso queda FALLIDO con la evidencia.
+    """
+    work = _workdir(plan, repo)
+    antes = _huella_tracked(work)
     # Autónomo: Claude corre la verificación del 'done' y su ÚLTIMA LÍNEA es el veredicto.
     ok, out = executors.run_agent(
         personas.system_for(step.tipo, repo, step.persona)
         + f"Verifica de forma autónoma que se cumple: {step.done}. Corre lo necesario y que tu ÚLTIMA "
-        f"LÍNEA sea exactamente VERIFICADO (si pasa) o FALLO seguido del motivo (si no)."
+        f"LÍNEA sea exactamente VERIFICADO (si pasa) o FALLO seguido del motivo (si no). "
+        f"NO edites ningún archivo: solo observa y reporta."
         + _context(step, plan),
-        cwd=_workdir(plan, repo),
+        cwd=work,
         mode="edit",
+        no_write=True,
         model=config.model_for("verificar", step.persona),
     )
     if not ok:
         return FALLIDO, _nota_fallo(out, "no se pudo verificar")
+    despues = _huella_tracked(work)
+    if antes is not None and despues is not None and antes != despues:
+        tocados = ", ".join(_archivos_tocados(despues)[:6]) or "(sin detalle)"
+        return FALLIDO, (
+            "veredicto descartado: el verificador MODIFICÓ el árbol que auditaba "
+            f"(archivos sucios ahora: {tocados}). Revisa el cambio antes de dar el paso por hecho."
+            f"\n{(out or '').strip()}"
+        )[:_NOTE_LIMIT]
     # Miramos SOLO la última línea (el veredicto): así menciones de "fallo(s)" en el análisis no
     # tumban un verificar que en realidad pasó.
     lineas = [ln.strip() for ln in (out or "").strip().splitlines() if ln.strip()]
