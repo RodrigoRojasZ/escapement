@@ -287,6 +287,37 @@ def test_guard_cli_deny_shell_no_afecta_otras_tools():
     assert r.stdout.strip() == ""  # editar/leer siguen permitidos: solo se confina el shell
 
 
+# --- Deuda #12: con AGENT_DENY_WRITE=1 (paso de verificación) el hook deniega TODA escritura ---
+
+
+@pytest.mark.parametrize("tool", ["Write", "Edit", "MultiEdit", "NotebookEdit"])
+def test_guard_cli_deny_write_bloquea_las_tools_de_edicion(tool):
+    evento = json.dumps({"tool_name": tool, "tool_input": {"file_path": "src/main.py"}})
+    r = _run_hook_env(evento, {"AGENT_DENY_WRITE": "1"})
+    assert r.returncode == 0
+    out = json.loads(r.stdout)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "escritura deshabilitada" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_guard_cli_deny_write_deja_pasar_leer_y_shell():
+    # al revés que deny_shell: verificar SÍ necesita correr pytest, lo que no puede es editar
+    for evento in (
+        {"tool_name": "Read", "tool_input": {"file_path": "src/main.py"}},
+        {"tool_name": "Bash", "tool_input": {"command": "pytest -q"}},
+    ):
+        r = _run_hook_env(json.dumps(evento), {"AGENT_DENY_WRITE": "1"})
+        assert r.returncode == 0
+        assert r.stdout.strip() == "", evento["tool_name"]
+
+
+def test_guard_cli_sin_deny_write_permite_editar():
+    # el default es no-op: sin la marca en el env, un Write inocuo sigue pasando
+    evento = json.dumps({"tool_name": "Write", "tool_input": {"file_path": "src/main.py"}})
+    r = _run_hook(evento)
+    assert r.returncode == 0 and r.stdout.strip() == ""
+
+
 # --- Ramas protegidas configurables (solo aditivo) ---
 def test_protegidas_por_default_son_las_de_integracion():
     # el default publico no menciona la rama de integracion de nadie...

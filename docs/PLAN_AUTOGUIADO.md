@@ -150,13 +150,13 @@ la siguiente: si la sesión se corta, lo cerrado queda cerrado.
 | Fixture `autouse` en `tests/conftest.py` que redirige `config.EVENTS` a `tmp_path` | #15 | la suite completa no añade una sola línea a `data/events.jsonl` | ✅ 664 líneas antes y después (antes: +592 por corrida) |
 | `_repo_utilizable()` valida el repo en las dos vías de `_run_ejecutar` (argumento y `plan.repo`) | #16 | una ruta con typo que comparte slug no carga el plan, no lo pisa y no corre | ✅ 2 tests que fallan sin el parche |
 
-**E4.2 · El paso no miente sobre su efecto — pendiente**
+**E4.2 · El paso no miente sobre su efecto — en curso (#17 y #12 ✅, falta #13)**
 
-| Ítem | Deuda | Done verificable |
-|---|---|---|
-| `no_write` en `run_agent` (espejo de `no_shell`: env `AGENT_DENY_WRITE` + `--disallowedTools Write Edit MultiEdit NotebookEdit`, honrado por `guard_cli`) y `_h_verificar` despachando con él | #12 | un verificador que intente escribir es bloqueado; el paso queda FALLIDO si el árbol cambió durante la verificación |
-| Huella de disco sensible al **contenido** de untracked: tercer componente con el sha256 de `git ls-files --others --exclude-standard`, fuera del primer `\0` para no romper `_rutas_de_huella` | #17 | reescribir un untracked sin cambiar su nombre mueve la huella |
-| `_insertar_pasos` valida `tipo` contra las claves de `DEFAULT_HANDLERS` (desconocido → `investigar`) y un mínimo de calidad de la acción | #13 | un paso inventado con `tipo` basura no se cuela; `run_plan(..., handlers=...)` sigue funcionando |
+| Ítem | Deuda | Done verificable | Estado |
+|---|---|---|---|
+| `no_write` en `run_agent` (espejo de `no_shell`: env `AGENT_DENY_WRITE` + `--disallowedTools Write Edit MultiEdit NotebookEdit`, honrado por `guard_cli`) y `_h_verificar` despachando con él | #12 | un verificador que intente escribir es bloqueado; el paso queda FALLIDO si el árbol cambió durante la verificación | ✅ 14 tests (12 fallan sin el parche); la huella del antes/después es de lo **tracked**, para no confundir el `.pytest_cache/` que siembra verificar |
+| Huella de disco sensible al **contenido** de untracked: tercer componente con el sha256 de `git ls-files --others --exclude-standard`, fuera del primer `\0` para no romper `_rutas_de_huella` | #17 | reescribir un untracked sin cambiar su nombre mueve la huella | ✅ 5 tests, commit `4954776`; `_archivos_tocados` intacto (lee hasta el primer `\0`) |
+| `_insertar_pasos` valida `tipo` contra las claves de `DEFAULT_HANDLERS` (desconocido → `investigar`) y un mínimo de calidad de la acción | #13 | un paso inventado con `tipo` basura no se cuela; `run_plan(..., handlers=...)` sigue funcionando | pendiente |
 
 Depende de E4.1 sólo en lo práctico (correr la suite desatendida sin que el journal ni los prompts
 estorben), no en el código.
@@ -189,7 +189,7 @@ La innovación es apuntarlo hacia adentro:
 
 | Métrica | Fuente | Hoy | Meta |
 |---|---|---|---|
-| Deudas abiertas en DEUDAS.md | el propio doc | 4 tras E4.1: #11 #12 #13 #17 (eran 5 tras E0: #4 #6 #7 #8 #10) | tendencia a la baja, edad < 1 mes |
+| Deudas abiertas en DEUDAS.md | el propio doc | 2 tras #17 y #12: #11 #13 (eran 4 tras E4.1; 5 tras E0: #4 #6 #7 #8 #10) | tendencia a la baja, edad < 1 mes |
 | Docs sin marca de vigencia | `docs/` | 0 tras E0 | 0 |
 | Planes cerrados por criterio (vs conteo) | topics `plan.eval` | 0% (no existe) | 100% post-E2 |
 | PRs con check de CI | GitHub | 0% (no hay CI) | 100% post-E1 |

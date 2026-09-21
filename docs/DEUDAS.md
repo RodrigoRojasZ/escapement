@@ -1,8 +1,9 @@
 # Deudas técnicas de Escapement — 2026-07-31
 
 > **Estado: vigente** — única lista viva de deudas del repo. Última revisión: 2026-09-20 (Etapa
-> E4.1 del [plan auto-guiado](PLAN_AUTOGUIADO.md): cerradas **#14, #15 y #16** en el commit
-> `b5aed66`. Deudas abiertas: **#11, #12, #13 y #17**. Antes: 2026-08-28 (Etapa 2
+> E4.2 del [plan auto-guiado](PLAN_AUTOGUIADO.md): cerradas **#17** (commit `4954776`) y **#12**
+> (commits `ef65edd` + tests). Deudas abiertas: **#11 y #13**. Antes: 2026-09-20 (E4.1: cerradas
+> **#14, #15 y #16** en el commit `b5aed66`). Antes: 2026-08-28 (Etapa 2
 > del [plan auto-guiado](PLAN_AUTOGUIADO.md) **completada**: cerrada #7 — ciclo
 > evaluar→replanificar entregado en PRs #10/#11/#12 y validado en real; alta de #11–#17, hallazgos
 > de esa validación. Antes: E1 cerró #10, #4, #6 y #8; E0 cerró #3, #5 y #9 con alta de #10.
@@ -331,10 +332,14 @@ honestamente contra el worktree y frenó la corrida en checkpoint — hubo que t
 el `optimize`, la rama resultante se fusione al worktree del plan antes de continuar). Mientras
 tanto, el carril target además usa `repo` sin validar — ver #16.
 
-### 12. `_h_verificar` despacha con `mode="edit"`: el verificador puede escribir lo que verifica
+### 12. `_h_verificar` despacha con `mode="edit"`: el verificador puede escribir lo que verifica — ✅ cerrada (2026-09-20)
 
 **Impacto: alto · Esfuerzo: bajo** · *Registrada el 2026-08-28: hallazgo de la validación en real
 de E2 (deuda #7).*
+
+> **Cerrada.** Dos capas: `no_write` le quita las tools de edición al dispatch y una huella del
+> árbol antes/después descarta el veredicto si igual lo tocó. Detalle abajo, después del
+> diagnóstico original.
 
 `_h_verificar` ([runner.py:702](../src/agent/runner.py#L702)) despacha al agente con `mode="edit"`
 ([runner.py:710](../src/agent/runner.py#L710)), mientras que `_h_investigar` usa `mode="read"`
@@ -350,6 +355,29 @@ paso 3 hubiera funcionado.
 **Arreglo propuesto:** verificación sin escritura de archivos. Si `mode="read"` bloquea también la
 ejecución de comandos (un verificar legítimo corre `pytest`/`py_compile`), decidir mirando qué
 permite cada modo del executor: lo indispensable es que no pueda **editar** el árbol que audita.
+
+**Arreglo aplicado (2026-09-20, E4.2):** se mantiene `mode="edit"` —una verificación real corre
+`pytest`, y `mode="read"` le quitaría el shell— y se cierra la **escritura**, en dos capas.
+
+1. **Permisos del dispatch:** `no_write` en
+   [`run_agent`](../src/agent/executors.py), calcado de `no_shell`: marca
+   `AGENT_DENY_WRITE=1` en el env del subproceso (que el hook
+   [`guard_cli`](../src/agent/security/guard_cli.py) hereda y usa para denegar `Write`, `Edit`,
+   `MultiEdit` y `NotebookEdit`) y pasa `--disallowedTools` al CLI. Las dos marcas se acumulan sin
+   pisarse; `agy`/`cursor` siguen ignorando el kwarg (misma limitación documentada de `no_shell`).
+2. **Comprobación en disco:** eso no cubre un `echo > archivo` por shell, así que
+   [`_h_verificar`](../src/agent/runner.py) compara `_huella_tracked(work)` antes y después del
+   dispatch. Si difieren, el veredicto se descarta: el paso queda **FALLIDO** con los archivos
+   sucios en la nota, aunque el agente haya dicho `VERIFICADO`.
+
+`_huella_tracked` deja fuera los untracked a propósito —al revés que `_git_status`—: una
+verificación legítima corre `pytest` y siembra `.pytest_cache/`/`__pycache__/`, y contar eso como
+"el verificador editó" frenaría corridas sanas. Reescribir el código auditado sí es una
+modificación de algo tracked y sí se ve. **Verificación:** 14 tests nuevos (4 del builder y el env
+en `test_executors.py`, 6 del hook en `test_guard.py`, 4 de `_h_verificar`/`_huella_tracked` en
+`test_runner.py`); 12 de ellos fallan con el `src/` del commit anterior (`4954776`) y pasan con el
+parche — los 2 que no son los que fijan que el default sigue siendo no-op. Suite completa: 912
+pasando.
 
 ### 13. `_insertar_pasos` no valida `tipo` ni calidad mínima de los pasos de la auto-evolución
 
@@ -370,10 +398,13 @@ bloqueado y hubo que quitar los cuatro a mano con `escapement plan quitar`.
 `investigar`, y un umbral mínimo para `accion` (p. ej. largo mínimo y distinta del propio tipo).
 Aplica igual a los pasos que llegan por replanificación (#7), que entran por la misma función.
 
-### 17. El guard de efecto en disco es ciego al contenido de archivos untracked
+### 17. El guard de efecto en disco es ciego al contenido de archivos untracked — ✅ cerrada (2026-09-20)
 
 **Impacto: medio · Esfuerzo: bajo** · *Registrada el 2026-08-28: hallazgo de la validación en real
 de E2 (deuda #7).*
+
+> **Cerrada.** Tercer componente de la huella con el sha256 de cada untracked, al final para no
+> mover lo que ya consumía `_archivos_tocados`. Detalle abajo, después del diagnóstico original.
 
 `_git_status` ([runner.py:139](../src/agent/runner.py#L139)) combina `git status --porcelain` +
 `git diff HEAD` como huella "sensible al contenido" para que `_h_editar` detecte falsos `hecho`.
@@ -390,6 +421,19 @@ archivo". Falso negativo: frenó la corrida en checkpoint por un cambio que sí 
 **Arreglo propuesto:** incluir el contenido de los untracked en la huella — p. ej. sumar
 `git status --porcelain` + hash del contenido de cada `??` (o `git add -N` efímero para que el
 diff los vea). Con eso el mismo guard cubre ambos carriles sin cambiar su semántica.
+
+**Arreglo aplicado (2026-09-20, E4.2, commit `4954776`):** `_huella_untracked` lista con
+`git ls-files --others --exclude-standard -z` —mismo criterio de ignorados que el porcelain, y
+`-z` evita el quoting de `core.quotepath` en rutas con acentos— y devuelve una línea
+`"<sha256> <ruta>"` por archivo, ordenadas para que la huella sea estable. `_git_status` la suma
+como **tercer** componente, tras el segundo `\0`: `_archivos_tocados` lee solo hasta el primero,
+así que la extracción de rutas no cambia (hay un test que lo fija). Techo de lectura de 8 MiB por
+huella (`_HUELLA_UNTRACKED_BYTES`): pasado el presupuesto la marca cae a `size:<n>`, que aún capta
+un cambio de tamaño, para que un `node_modules/` sin trackear no vuelva lenta cada comprobación;
+`ilegible` si el archivo desaparece entre el listado y la lectura. **Verificación:** 5 tests nuevos
+en `test_runner.py` —el central reescribe un untracked sin renombrarlo y comprueba que el porcelain
+y el diff quedan idénticos (`h1.split("\0")[:2] == h2.split("\0")[:2]`, esa era la trampa) mientras
+la huella completa sí se mueve—; los 4 que ejercen el código nuevo fallan con el `src/` anterior.
 
 ---
 

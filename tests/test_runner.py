@@ -378,6 +378,72 @@ def test_verificar_ignora_fallo_en_el_analisis(monkeypatch):
     assert p.pasos[0].estado == HECHO
 
 
+# --- Deuda #12: el verificador no puede editar lo que audita (si lo hace, el veredicto no vale) ---
+
+
+def _plan_verificar(repo):
+    """Plan de un solo paso 'verificar' cuyo worktree ES el repo temporal."""
+    p = Plan("o", "g", [Step(1, "verifica", "verificar", "los tests pasan", [])])
+    p.workdir = str(repo)
+    return p
+
+
+def test_verificar_despacha_sin_poder_escribir(monkeypatch, tmp_path):
+    capturado = {}
+
+    def _fake(*a, **k):
+        capturado.update(k)
+        return True, "VERIFICADO"
+
+    monkeypatch.setattr(runner.executors, "run_agent", _fake)
+    p = _plan_verificar(_repo_con_commit(tmp_path))
+    assert runner._h_verificar(p.pasos[0], p, str(tmp_path)) == (HECHO, "verificado")
+    assert capturado["no_write"] is True  # primera capa: sin tools de edición
+    assert capturado["mode"] == "edit"  # pero con shell: una verificación real corre pytest
+
+
+def test_verificar_descarta_el_veredicto_si_toco_el_arbol(monkeypatch, tmp_path):
+    # Pasó en la validación de E2: el verificador escribió él mismo lo que debía revisar.
+    repo = _repo_con_commit(tmp_path)
+
+    def _fake(*a, **k):
+        (repo / "base.py").write_text("x = 99  # lo 'arreglé' yo\n", encoding="utf-8")
+        return True, "Todo en orden.\nVERIFICADO"
+
+    monkeypatch.setattr(runner.executors, "run_agent", _fake)
+    p = _plan_verificar(repo)
+    estado, nota = runner._h_verificar(p.pasos[0], p, str(repo))
+    assert estado == runner.FALLIDO  # el VERIFICADO no se acepta: lo emitió quien tocó el árbol
+    assert "MODIFICÓ el árbol que auditaba" in nota
+    assert "base.py" in nota  # y dice cuál, para poder revisarlo
+
+
+def test_verificar_no_se_queja_de_los_untracked_que_siembra_pytest(monkeypatch, tmp_path):
+    # Correr la verificación deja .pytest_cache/ y __pycache__/: eso NO es "el verificador editó".
+    repo = _repo_con_commit(tmp_path)
+
+    def _fake(*a, **k):
+        (repo / ".pytest_cache").mkdir()
+        (repo / ".pytest_cache" / "CACHEDIR.TAG").write_text("basura\n", encoding="utf-8")
+        return True, "VERIFICADO"
+
+    monkeypatch.setattr(runner.executors, "run_agent", _fake)
+    p = _plan_verificar(repo)
+    assert runner._h_verificar(p.pasos[0], p, str(repo)) == (HECHO, "verificado")
+
+
+def test_huella_tracked_ignora_untracked_y_es_none_fuera_de_repo(tmp_path):
+    repo = _repo_con_commit(tmp_path)
+    antes = runner._huella_tracked(str(repo))
+    (repo / "nuevo.md").write_text("hola\n", encoding="utf-8")
+    assert runner._huella_tracked(str(repo)) == antes  # un archivo nuevo no mueve la huella...
+    (repo / "base.py").write_text("x = 2\n", encoding="utf-8")
+    assert runner._huella_tracked(str(repo)) != antes  # ...pero modificar lo tracked sí
+    fuera = tmp_path.parent / "sin_git"
+    fuera.mkdir(exist_ok=True)
+    assert runner._huella_tracked(str(fuera)) is None  # sin git: None -> no se compara, no bloquea
+
+
 # --- Auto-evolución (Fase C): reflexionar añade pasos ---
 
 
