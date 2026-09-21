@@ -1,0 +1,26 @@
+# Entorno / build
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Secretos y config local
+.env
+.env.*
+!.env.example
+escapement.toml
+
+# Test / cache
+.pytest_cache/
+.ruff_cache/
+
+# Modelos / audio locales (fases de voz y LLM local)
+models/
+*.gguf
+*.onnx
+*.wav
+
+# Datos operacionales locales (ledger, cola, conversaciones, sesión de voz) — no subir a GitHub
+data/

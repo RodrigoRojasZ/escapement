@@ -1,0 +1,32 @@
+# requirements.txt — dependencias de terceros del agente (vista legible/portable).
+# Fuente de verdad: pyproject.toml (uv). Para instalar todo: `pip install -r requirements.txt`
+# o, recomendado, `uv sync --all-groups`. La librería estándar (asyncio, json, re, pathlib,
+# subprocess, dataclasses...) NO se lista: viene con Python.
+
+# --- Núcleo (siempre) ---
+claude-agent-sdk         # loop del agente, tools MCP, hooks, gate de permisos
+httpx                    # ping al endpoint de Ollama (router._available)
+
+# --- LLM local / router híbrido (grupo: local) ---
+openai                   # cliente OpenAI-compat para Ollama (router.ask_local)
+
+# --- Recall semántico (grupo: semantic) ---
+fastembed                # embeddings ONNX sobre el vault, sin torch (tools/semantic)
+
+# --- Voz F2 (grupo: voice) ---
+faster-whisper           # STT local (CTranslate2)
+sounddevice              # captura/reproducción de audio
+soundfile                # I/O de WAV
+numpy                    # buffers de audio y embeddings
+keyboard>=0.13.5         # push-to-talk (hotkey F2)
+kokoro-onnx              # TTS neuronal (Kokoro-82M) local, español
+pywin32                  # win32com: fallback SAPI TTS (Windows)
+pystray                  # ícono en la bandeja del sistema (daemon residente)
+pillow                   # genera el ícono de la bandeja
+# STT en GPU (CUDA 12) para ctranslate2 en Windows; cuBLAS depende de cudart:
+nvidia-cublas-cu12
+nvidia-cudnn-cu12
+nvidia-cuda-runtime-cu12
+
+# --- Desarrollo (grupo: dev) ---
+pytest>=8                # tests aislados (sin Chrome/API)

@@ -1,0 +1,159 @@
+# Config local de Escapement (M1). Copia este archivo a escapement.toml (gitignorado) y ajusta.
+# Precedencia de cada valor: env var > este archivo > default del código.
+# Ubicación alternativa: apunta AGENT_CONFIG_FILE a cualquier ruta.
+
+# Rutas del sustrato de memoria (defaults: layout de ~/.claude)
+# recall_script = "C:/Users/tu-usuario/.claude/tools/recall_memory.py"
+# projects_dir = "C:/Users/tu-usuario/.claude/projects"
+
+# Datos operacionales (ledger, cola, planes). Default: <repo>/data
+# data_dir = "D:/escapement-data"
+
+# Budget por plan (R3): tope opcional de tokens ESTIMADOS por corrida del runner. Sin esto (default)
+# no hay tope. Con un entero positivo, el runner deja de despachar pasos y los marca 'bloqueado'
+# cuando el gasto estimado del plan lo supera. Es un proxy (~4 chars/token), no una factura real.
+# Override por env: AGENT_BUDGET_TOKENS_PER_PLAN.
+# [budget]
+# tokens_por_plan = 200000
+
+# Checkpoint de aprobación del plan (M1): antes de la PRIMERA corrida de un plan, `escapement ejecutar`
+# imprime el roadmap completo y pide confirmación [s/N]. Solo en terminal INTERACTIVA: sin TTY
+# (cron, un pipe) ejecuta sin preguntar. Reanudar tras un checkpoint tampoco vuelve a preguntar (ya
+# estaba aprobado). Los flujos autónomos por diseño (`memoria`, `repaso`, la tool MCP) llaman al
+# runner directo y no pasan por aquí. false = nunca preguntar. Salto por corrida: `ejecutar --si`.
+# Override por env: AGENT_PLAN_APPROVAL.
+#
+# Evaluación global al cerrar (E2, deuda #7): con el roadmap agotado en 'hecho', un dispatch
+# READ-ONLY contrasta el resultado contra el criterio_global del plan. 'done' sella el cierre;
+# 'incompleto' persiste los gaps en el plan (insumo de la replanificación) y no captura la
+# trayectoria como éxito. Best-effort: sin veredicto usable, cierre por conteo como siempre.
+# false = comportamiento previo exacto. Override por env: AGENT_PLAN_EVAL.
+#
+# Replanificación automática (E2, pieza 2): un veredicto 'incompleto' convierte sus gaps en pasos
+# nuevos y la corrida sigue, hasta replan_max ciclos evaluar->replanificar por plan (el contador
+# persiste en el JSON: reanudar no lo resetea). Al tope, checkpoint humano: la corrida termina
+# incompleta con los gaps guardados. 0 = apaga SOLO la replanificación (la evaluación sigue);
+# basura o negativo = default. Override por env: AGENT_PLAN_REPLAN_MAX.
+# [plan]
+# aprobacion = true
+# evaluacion = true
+# replan_max = 2
+
+# Swarm (R4): fan-out de subagentes en paralelo para un paso 'swarm' (investigación amplia, SOLO
+# lectura). El agente descompone la investigación en subtareas independientes y las corre a la vez.
+# max_workers = hilos concurrentes (default 4); max_subtareas = tope de subtareas por swarm (default 6).
+# Ambos deben ser enteros positivos; un valor inválido cae al default. Overrides por env:
+# AGENT_SWARM_MAX_WORKERS y AGENT_SWARM_MAX_TASKS.
+# [swarm]
+# max_workers = 4
+# max_subtareas = 6
+
+# LLM local (Ollama, API OpenAI-compat). Dos usos, AMBOS activos por defecto (enabled=true):
+#   1) Conversación/voz (F1): el router manda los turnos triviales al modelo local para no gastar
+#      cuota de Claude.
+#   2) Orquestador: el ruteo estratégico local/online está SIEMPRE activo (no hay flag de
+#      activación). Los pasos de RAZONAMIENTO read-only (reflexionar, descomposición del swarm,
+#      triage de preguntar) se despachan al local si son fáciles, y caen a Claude si la salida no
+#      valida o el paso es difícil (persona pesada, señal de dificultad en el texto, edición/
+#      ejecución, o sesión por voz). Para apagar TODO lo local (voz incluida) -> enabled=false.
+# Overrides por env (ganan sobre este archivo): AGENT_LOCAL_LLM_ENABLED, AGENT_LOCAL_LLM_BASE_URL,
+# AGENT_LOCAL_LLM_MODEL, AGENT_LOCAL_LLM_MODEL_MEDIUM, AGENT_LOCAL_LLM_KEEP_ALIVE,
+# AGENT_LOCAL_LLM_KEEP_ALIVE_BUSY, AGENT_LOCAL_LLM_TIMEOUT, AGENT_LOCAL_AUTO_SELECT,
+# AGENT_LOCAL_VRAM_MEDIUM_MB, AGENT_LOCAL_ORCH_TOOLS, AGENT_LOCAL_ORCH_DISABLE_ON_VOICE.
+# [local]
+# enabled = true                          # activa TODO el backend local (router de voz + orquestador)
+# base_url = "http://localhost:11434/v1"  # endpoint OpenAI-compat de Ollama
+# model = "qwen2.5:3b"                     # modelo LIGERO (voz y cuando la VRAM está ocupada)
+# model_medium = "qwen2.5-coder:7b"        # modelo MEDIO (solo con VRAM holgada y voz inactiva)
+# keep_alive = "5m"                        # cuánto retiene Ollama el modelo tras el último uso
+# keep_alive_busy = "0"                    # descarga inmediata cuando compite con la voz por la VRAM
+# timeout_s = 60                           # tope duro (s) de una request local; al superarlo cae a Claude
+# auto_select = true                       # elige ligero/medio según VRAM libre (nvidia-smi). Off => siempre ligero
+# vram_medium_mb = 5600                    # VRAM libre mínima (MB) para subir al modelo MEDIO
+# orchestrator_tools = false               # Fase 2: investigar/verificar read-only con tool-loop local (incierto)
+# orchestrator_disable_on_voice = true     # VETO de GPU: en sesión por voz el orquestador va 100% online
+
+# Voz (daemon --voz): STT local con faster-whisper. Default: large-v3-turbo en int8_float16
+# (multilingüe es/en, ~1.2 GB de VRAM; large-v3 usa ~3 GB). OJO: los modelos distil-* son SOLO
+# inglés, no sirven para code-switching es/en. Overrides por env: AGENT_VOICE_STT_MODEL,
+# AGENT_VOICE_STT_DEVICE, AGENT_VOICE_STT_COMPUTE.
+# [voice]
+# stt_model = "large-v3-turbo"   # cualquier modelo de faster-whisper ("large-v3", "medium", ...)
+# stt_device = "cuda"            # "cuda" | "cpu"; con cuda hay fallback automático a cpu/int8
+# stt_compute = "int8_float16"   # "int8_float16" | "float16" (~2.2 GB, algo más preciso: solo con
+#                                # GPU holgada — en una de 8 GB compartida desborda a RAM) | "int8"
+# Wake word (manos libres, opcional): sin valor el daemon es solo push-to-talk F2. Con valor,
+# acepta AMBOS gatillos (decir la frase o F2); detección local en CPU con openWakeWord
+# (modelo <1 MB) y el micrófono queda abierto mientras el daemon espera. Overrides por env:
+# AGENT_VOICE_WAKE_WORD, AGENT_VOICE_WAKE_THRESHOLD.
+# wake_word = "hey_jarvis"       # preentrenados: hey_jarvis, alexa, hey_mycroft; o ruta a .onnx
+# wake_threshold = 0.5           # score mínimo 0-1; subirlo reduce falsos positivos
+# Modo de la hotkey (F2). "toggle" (default): interruptor — un toque abre la grabación y se
+# cierra con otro toque, ~2 s de silencio o el tope de seguridad (90 s). "hold": push-to-talk
+# clásico — graba solo mientras la tecla siga presionada. Override por env: AGENT_VOICE_PTT_MODE.
+# ptt_mode = "toggle"            # "toggle" | "hold"
+# Barge-in (activo por default): F2 mientras Escapement habla corta la reproducción en el acto.
+# false = el TTS no se puede interrumpir (útil con micrófono sensible o altavoces abiertos).
+# Override por env: AGENT_VOICE_BARGE_IN.
+# barge_in = true                # true (default) | false
+# Habla en streaming (activa por default): Escapement dice la respuesta por frases mientras el
+# modelo la escribe, en vez de esperar a tenerla entera. false = comportamiento previo (una sola
+# reproducción al final). Override por env: AGENT_VOICE_STREAM_TTS.
+# stream_tts = true              # true (default) | false
+# Sesión abierta (activa por default): F2 abre una conversación, no un turno — tras cada respuesta
+# el micrófono se reabre solo (con un chime) y F2 con el micrófono abierto la cierra; también se
+# cierra sola tras 45 s sin voz. false = una pulsación de F2 por turno, como antes.
+# Override por env: AGENT_VOICE_OPEN_SESSION.
+# open_session = true            # true (default) | false
+
+# Quien es el "tu" de los system prompts: el agente te nombra asi en vez de decir "tu usuario".
+# El perfil es opcional y enmarca tu oficio (aparece como aposicion: "el asistente personal de
+# Ada Lovelace (analytical engines)"). Equivalentes por env: AGENT_USER_NAME / AGENT_USER_PROFILE.
+# [usuario]
+# nombre = "Ada Lovelace"
+# perfil = "analytical engines"
+
+# Ramas protegidas: el gate (src/agent/security/guard.py) prohibe commit/push sobre ellas. Los
+# defaults main y master estan SIEMPRE protegidos; esta clave solo AÑADE la rama de integracion
+# propia de tu flujo. No hay forma de desproteger main/master desde aqui ni desde una env var: un
+# gate que se apaga por config no es un gate. Override por env: AGENT_PROTECTED_BRANCHES (nombres
+# separados por coma, se suman a los del archivo).
+# La misma lista alimenta los candidatos a rama BASE de una entrega (runner.default_branch), que
+# prueba en orden: las protegidas y luego "develop".
+# [git]
+# ramas_protegidas = ["integracion"]
+
+# Repositorios que gestionas (nombre -> ruta). El único default es "escapement" (el repo del agente);
+# lo que pongas aquí se añade y puede pisarlo. Sirve para que las tareas cross-repo (compilar
+# memoria, auditar) sepan qué explorar sin enumerárselo.
+#
+# El NOMBRE importa: es lo que `personas.select` compara contra los SLOTS que declara cada coder de
+# dominio para auto-enrutar el paso. Slots que trae el registro: "scraper" -> persona `scraping`,
+# "backend" -> `backend-app`. Nombra el repo con su slot y el ruteo sale solo; con cualquier otro
+# nombre el paso cae al `ingeniero` genérico, que también es una respuesta válida. Si prefieres
+# conservar tus nombres reales, rebindea el slot en [personas] (abajo).
+[repos]
+# scraper = "D:/mi_scraper"
+# backend = "D:/mi_api"
+# notas = "D:/mi_vault"
+
+# Personas (src/agent/personas.py): el registro del código es el default PÚBLICO —prompts de dominio
+# genéricos y slots de repo— porque ni tus repos ni los gotchas de tu código pertenecen a un repo
+# público. Aquí los ajustas sin tocar el código, y este archivo está gitignorado.
+#
+# Una tabla por persona, con el nombre EXACTO del registro (los que llevan guion van entre comillas:
+# [personas."backend-app"]). Todos los campos son opcionales; lo que no declares queda en su default:
+#   repos       = lista de nombres de [repos] que esta persona atiende. Es el binding real.
+#                 Lista vacía = genérica (atiende cualquier repo, y pierde ante las específicas).
+#   system      = el system prompt. Aquí es donde pones el dominio concreto: los gotchas de TU
+#                 código, los nombres de tus módulos, las trampas que ya pisaste.
+#   description = cuándo usar el agente (frontmatter del subagente de Claude Code + auto-enrutado).
+#   tipos       = tipos de paso que auto-enruta (editar/crear/ejecutar/investigar/verificar).
+#                 Lista vacía = sale del auto-ruteo y queda como especialista asignable por el planner.
+# Un nombre de persona inexistente, una clave desconocida o un valor del tipo equivocado se ignoran
+# en silencio: un error aquí degrada al default, no rompe el arranque.
+# [personas.scraping]
+# repos = ["mi_scraper", "mi_reporter"]
+# system = "Eres un experto en scraping y en el dominio de mi_scraper. Dominas … Recuerdas los gotchas reales: …"
+# [personas."backend-app"]
+# repos = ["mi_api"]

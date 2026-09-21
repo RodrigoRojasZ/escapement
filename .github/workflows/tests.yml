@@ -1,0 +1,34 @@
+# CI mínimo (deuda #10): pytest en cada PR y en master.
+#
+# Decisiones:
+# - windows-latest: fidelidad con el entorno real (Escapement es Windows-céntrico: daemon,
+#   tray, SAPI). La suite ya corre 100% headless — el hardware de voz se mockea.
+# - Se excluyen los grupos `voice` (CUDA/ONNX/hardware, ~GBs inútiles en un runner) y
+#   `semantic` (fastembed; ningún test lo importa). El grupo `local` (openai) SÍ entra:
+#   test_local_models.py lo importa de verdad. numpy vive también en `dev` por lo mismo.
+# - `--locked`: instala exactamente uv.lock; si el lock quedó desincronizado del
+#   pyproject, el job falla en vez de resolver en silencio.
+# Validado en limpio (2026-08-26): 753 passed, 1 skipped sin escapement.toml ni data/.
+
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Instalar dependencias (sin voz/GPU ni semantic)
+        run: uv sync --locked --no-group voice --no-group semantic
+      - name: Correr la suite
+        run: uv run --no-sync pytest

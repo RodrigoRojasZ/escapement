@@ -1,0 +1,62 @@
+[project]
+name = "agent"
+version = "0.18.0"
+description = "Asistente personal tipo Jarvis sobre el Claude Agent SDK: recall cross-proyecto, memoria y operacion controlada del equipo."
+requires-python = ">=3.10"
+dependencies = [
+    "claude-agent-sdk",  # loop del agente, tools MCP, hooks, gate de permisos
+    "httpx",             # ping al endpoint de Ollama (router._available)
+]
+
+[project.scripts]
+agent = "agent.cli:main"
+escapement = "agent.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",  # tests aislados (sin Chrome/API)
+    "numpy",      # los tests de voz construyen buffers de audio falsos; el hardware real queda mockeado
+]
+voice = [
+    "faster-whisper",    # STT local (CTranslate2)
+    "sounddevice",       # captura/reproducción de audio
+    "soundfile",         # I/O de WAV
+    "numpy",             # buffers de audio y embeddings
+    "keyboard>=0.13.5",  # push-to-talk (hotkey F2)
+    "kokoro-onnx",       # TTS neuronal (Kokoro-82M) local, español out-of-the-box
+    "openwakeword",      # wake word manos libres (modelos ONNX <1 MB, CPU)
+    "pywin32",           # win32com: fallback SAPI TTS (Windows)
+    "pystray",           # ícono en la bandeja del sistema (daemon residente)
+    "pillow",            # genera el ícono de la bandeja
+    # STT en GPU (CUDA 12) para ctranslate2 en Windows; cuBLAS depende de cudart.
+    "nvidia-cublas-cu12",
+    "nvidia-cudnn-cu12",
+    "nvidia-cuda-runtime-cu12",
+]
+semantic = [
+    "fastembed",  # RAG semántico sobre el vault (embeddings ONNX, sin torch)
+]
+local = [
+    "openai",  # cliente del LLM local (Ollama, API OpenAI-compat) para el router híbrido
+]
+
+# Grupos que `uv sync` instala por defecto. Incluir voice/semantic/local evita que un
+# `uv sync` a secas los DESINSTALE (era la causa de "No module named 'soundfile'" al usar --voz).
+# Para un entorno mínimo (p.ej. sin voz), usar `uv sync --no-group voice`.
+[tool.uv]
+default-groups = ["dev", "voice", "semantic", "local"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
