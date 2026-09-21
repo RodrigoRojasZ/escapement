@@ -23,9 +23,12 @@ from pathlib import Path
 # src/ al path para que ``agent.security.guard`` resuelva sin depender del cwd ni venv.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-# Debe coincidir con executors.DENY_SHELL_ENV (no se importa: executors arrastra config
-# y este script debe seguir siendo stdlib-only, ejecutable por cualquier Python).
+# Deben coincidir con executors.DENY_SHELL_ENV / DENY_WRITE_ENV / _WRITE_TOOLS (no se
+# importan: executors arrastra config y este script debe seguir siendo stdlib-only,
+# ejecutable por cualquier Python).
 _DENY_SHELL_ENV = "AGENT_DENY_SHELL"
+_DENY_WRITE_ENV = "AGENT_DENY_WRITE"
+_WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 
 
 def main() -> int:
@@ -35,11 +38,13 @@ def main() -> int:
 
         # S3/H3: run_agent(no_shell=True) marca el dispatch via env (el hook hereda el env
         # del CLI). En esos pasos de EDICIÓN pura, cualquier shell se deniega de plano.
-        if os.environ.get(_DENY_SHELL_ENV) == "1" and data.get("tool_name") in (
-            "Bash",
-            "PowerShell",
-        ):
+        tool = data.get("tool_name", "")
+        if os.environ.get(_DENY_SHELL_ENV) == "1" and tool in ("Bash", "PowerShell"):
             reason = "shell deshabilitado en este dispatch (paso de edición: no corre comandos)"
+        # Deuda #12: el gemelo para VERIFICAR, que sí necesita shell pero no debe editar el
+        # árbol que audita (si lo "arregla" y reporta VERIFICADO, el veredicto no vale nada).
+        elif os.environ.get(_DENY_WRITE_ENV) == "1" and tool in _WRITE_TOOLS:
+            reason = "escritura deshabilitada en este dispatch (verificar no edita lo que audita)"
         else:
             reason = guard.evaluate(
                 data.get("tool_name", ""),

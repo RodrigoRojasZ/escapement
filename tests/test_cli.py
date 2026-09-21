@@ -1,5 +1,9 @@
 """Tests del dispatcher de comandos (tabla + alias + help + sugerencia de typo). Sin efectos."""
 
+from pathlib import Path
+
+import pytest
+
 from agent import cli
 
 
@@ -536,7 +540,8 @@ def _plan_para_ejecutar(tmp_path, monkeypatch, *, pasos=None, tty=True, respuest
     monkeypatch.setattr(cli.sys, "stdin", _Stdin(tty))
     monkeypatch.setattr("builtins.input", lambda _p: respuesta)
 
-    repo = r"G:\repo_aprobar"
+    repo = str(tmp_path / "repo_aprobar")
+    Path(repo).mkdir()  # `ejecutar` exige que el repo exista (deuda #16)
     destino = planner.repo_plan_path(repo)
     planner.save_plan(
         Plan("obj", "g", pasos or [Step(1, "hacer algo", "editar", "d", [])], repo=repo), destino
@@ -671,7 +676,8 @@ def _ejecutar_con_checkpoint(tmp_path, monkeypatch, *, tty, respuesta):
     _aisla_planes(tmp_path, monkeypatch)
     monkeypatch.setattr(cli.sys, "stdin", _Stdin(tty))
     monkeypatch.setattr("builtins.input", lambda _p: respuesta)
-    repo = r"G:\repo_inline"
+    repo = str(tmp_path / "repo_inline")
+    Path(repo).mkdir()  # `ejecutar` exige que el repo exista (deuda #16)
     destino = planner.repo_plan_path(repo)
     # la nota marca el plan como "ya corrió": la aprobación previa no se re-abre y el único
     # input del test es el del checkpoint inline
@@ -729,7 +735,8 @@ def _ejecutar_con_veredicto(
     monkeypatch.setattr(cli.config, "PLAN_EVAL", plan_eval)
     monkeypatch.setattr(cli.config, "PLAN_REPLAN_MAX", replan_max)
     monkeypatch.setattr(cli.sys, "stdin", _Stdin(False))  # sin TTY: ni aprobación ni rescate
-    repo = r"G:\repo_eval"
+    repo = str(tmp_path / "repo_eval")
+    Path(repo).mkdir()  # `ejecutar` exige que el repo exista (deuda #16)
     destino = planner.repo_plan_path(repo)
     pasos = [Step(1, "documenta worker/", "editar", "d", [], nota="ya corrió")]
     planner.save_plan(Plan("obj", "100% type hints en worker/", pasos, repo=repo), destino)
@@ -805,3 +812,139 @@ def test_cmd_con_help_flag_no_ejecuta_handler(capsys, monkeypatch):
     assert cli._dispatch(["trabajar", "--help"]) is True
     assert llamado["v"] is False  # --help en 1.ª posición muestra ayuda, no corre la cola
     assert "uso:" in capsys.readouterr().out.lower()
+# --- deuda #14: los prompts no revientan cuando isatty() miente (Windows headless) -----------
+def _eof(_p=""):
+    raise EOFError("EOF when reading a line")
+
+
+class _StdinRoto:
+    """stdin cerrado: hasta `isatty()` explota (pythonw, servicio, subproceso sin descriptor)."""
+
+    def isatty(self) -> bool:
+        raise ValueError("I/O operation on closed file")
+
+
+def test_respuesta_devuelve_lo_tecleado_en_tty(monkeypatch):
+    monkeypatch.setattr(cli.sys, "stdin", _Stdin(True))
+    monkeypatch.setattr("builtins.input", lambda _p: "  H ya está  ")
+    assert cli._respuesta("?") == "  H ya está  "  # sin normalizar: eso lo hace quien llama
+
+
+def test_respuesta_sin_tty_no_pregunta(monkeypatch):
+    monkeypatch.setattr(cli.sys, "stdin", _Stdin(False))
+    monkeypatch.setattr("builtins.input", lambda _p: pytest.fail("no debe preguntar sin TTY"))
+    assert cli._respuesta("?") is None
+
+
+def test_respuesta_con_eof_devuelve_none(monkeypatch):
+    # el caso de la deuda: isatty() dice True (NUL es char device) pero no hay nadie al otro lado
+    monkeypatch.setattr(cli.sys, "stdin", _Stdin(True))
+    monkeypatch.setattr("builtins.input", _eof)
+    assert cli._respuesta("?") is None
+
+
+def test_respuesta_con_stdin_cerrado_devuelve_none(monkeypatch):
+    monkeypatch.setattr(cli.sys, "stdin", _StdinRoto())
+    assert cli._respuesta("?") is None
+
+
+def test_respuesta_sin_stdin_devuelve_none(monkeypatch):
+    monkeypatch.setattr(cli.sys, "stdin", None)  # pythonw: sys.stdin puede ser None
+    assert cli._respuesta("?") is None
+
+
+def test_aprobar_plan_con_eof_ejecuta_como_desatendido(tmp_path, monkeypatch):
+    corridas = _plan_para_ejecutar(tmp_path, monkeypatch)
+    monkeypatch.setattr("builtins.input", _eof)
+    cli._run_ejecutar([])  # antes: EOFError -> traceback y exit 1 sin correr nada
+    assert len(corridas) == 1
+
+
+def test_checkpoint_inline_con_eof_sale_sin_romper(tmp_path, monkeypatch):
+    from agent import planner
+
+    p, destino = _paso_trabado(tmp_path, monkeypatch)
+    monkeypatch.setattr("builtins.input", _eof)
+    assert cli._checkpoint_inline(p.pasos[0], p, destino) is False
+    assert planner.load_plan(destino).pasos[0].estado == "fallido"  # no tocó el plan
+
+
+def _plan_con_traza(monkeypatch, tmp_path, *, tty=True):
+    """Plan 'completo' con archivos en el worktree: `_reporte_traza` llega a ofrecer el rescate."""
+    from agent import runner
+    from agent.planner import Plan
+
+    plan = Plan("obj", "crit", [], repo=str(tmp_path), workdir=str(tmp_path / "wt"), rama="r")
+    monkeypatch.setattr(cli.sys, "stdin", _Stdin(tty))
+    monkeypatch.setattr(runner, "archivos_del_plan", lambda _p: ["a.py"])
+    monkeypatch.setattr(runner, "default_branch", lambda _r: "main")
+    monkeypatch.setattr(
+        runner, "traspasar_a_rama", lambda *a, **k: pytest.fail("no debe traspasar sin un sí")
+    )
+    return plan
+
+
+def test_reporte_traza_con_eof_imprime_la_salida_manual(capsys, tmp_path, monkeypatch):
+    plan = _plan_con_traza(monkeypatch, tmp_path)
+    monkeypatch.setattr("builtins.input", _eof)
+    cli._reporte_traza(plan, str(tmp_path), completo=True)  # antes: EOFError tras una corrida OK
+    out = capsys.readouterr().out
+    assert "[rescate] para traspasar el trabajo a una rama basada en 'main'" in out
+
+
+def test_reporte_traza_sin_tty_mantiene_el_mensaje_de_siempre(capsys, tmp_path, monkeypatch):
+    plan = _plan_con_traza(monkeypatch, tmp_path, tty=False)
+    monkeypatch.setattr("builtins.input", lambda _p: pytest.fail("no debe preguntar sin TTY"))
+    cli._reporte_traza(plan, str(tmp_path), completo=True)
+    assert "re-lanza en una terminal interactiva" in capsys.readouterr().out
+
+
+def test_reporte_traza_negativa_deja_el_trabajo_en_el_worktree(capsys, tmp_path, monkeypatch):
+    plan = _plan_con_traza(monkeypatch, tmp_path)
+    monkeypatch.setattr("builtins.input", lambda _p: " N \n".strip())
+    cli._reporte_traza(plan, str(tmp_path), completo=True)
+    assert "lo dejo en el worktree del plan" in capsys.readouterr().out
+
+
+def test_reporte_traza_afirmativa_traspasa_a_rama(capsys, tmp_path, monkeypatch):
+    from agent import runner
+
+    plan = _plan_con_traza(monkeypatch, tmp_path)
+    monkeypatch.setattr("builtins.input", lambda _p: "  S  ")  # con espacios y mayúscula
+    monkeypatch.setattr(
+        runner,
+        "traspasar_a_rama",
+        lambda *a, **k: runner.Traspaso(True, rama="rescate/x", base="main"),
+    )
+    cli._reporte_traza(plan, str(tmp_path), completo=True)
+    assert "trabajo traspasado a la rama 'rescate/x'" in capsys.readouterr().out
+# --- deuda #16: `ejecutar` no arranca contra un repo que no existe ---------------------------
+def test_ejecutar_con_ruta_de_typo_no_carga_el_plan_del_repo_bueno(capsys, tmp_path, monkeypatch):
+    # el slug machaca lo no alfanumérico, así que 'repo-aprobar' resuelve al MISMO plan_<slug>.json
+    # que 'repo_aprobar': antes cargaba ese plan, le pisaba `repo` con la ruta mala y corría.
+    from agent import planner
+
+    corridas = _plan_para_ejecutar(tmp_path, monkeypatch, respuesta="s")
+    repo, typo = str(tmp_path / "repo_aprobar"), str(tmp_path / "repo-aprobar")
+    assert planner.repo_plan_path(typo) == planner.repo_plan_path(repo)  # la trampa, confirmada
+    cli._run_ejecutar([typo])
+    assert corridas == []
+    assert "no existe" in capsys.readouterr().out
+    assert planner.load_plan(planner.repo_plan_path(repo)).repo == repo  # ni le tocó el plan
+
+
+def test_ejecutar_sin_arg_avisa_si_el_repo_del_plan_ya_no_esta(capsys, tmp_path, monkeypatch):
+    corridas = _plan_para_ejecutar(tmp_path, monkeypatch, respuesta="s")
+    (tmp_path / "repo_aprobar").rmdir()  # el repo se movió o se borró tras planificar
+    cli._run_ejecutar([])
+    assert corridas == []
+    assert "el plan apunta a una carpeta que no existe" in capsys.readouterr().out
+
+
+def test_repo_utilizable_distingue_carpeta_de_archivo_y_de_ruta_ilegal(capsys, tmp_path):
+    archivo = tmp_path / "no_soy_carpeta.txt"
+    archivo.write_text("x", encoding="utf-8")
+    assert cli._repo_utilizable(str(tmp_path), "'x'") is True
+    assert cli._repo_utilizable(str(archivo), "'x'") is False
+    assert cli._repo_utilizable("\0ruta ilegal", "'x'") is False  # is_dir() no levanta: solo False
+    assert capsys.readouterr().out.count("no existe") == 2

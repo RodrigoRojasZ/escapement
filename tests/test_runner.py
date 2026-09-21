@@ -378,6 +378,72 @@ def test_verificar_ignora_fallo_en_el_analisis(monkeypatch):
     assert p.pasos[0].estado == HECHO
 
 
+# --- Deuda #12: el verificador no puede editar lo que audita (si lo hace, el veredicto no vale) ---
+
+
+def _plan_verificar(repo):
+    """Plan de un solo paso 'verificar' cuyo worktree ES el repo temporal."""
+    p = Plan("o", "g", [Step(1, "verifica", "verificar", "los tests pasan", [])])
+    p.workdir = str(repo)
+    return p
+
+
+def test_verificar_despacha_sin_poder_escribir(monkeypatch, tmp_path):
+    capturado = {}
+
+    def _fake(*a, **k):
+        capturado.update(k)
+        return True, "VERIFICADO"
+
+    monkeypatch.setattr(runner.executors, "run_agent", _fake)
+    p = _plan_verificar(_repo_con_commit(tmp_path))
+    assert runner._h_verificar(p.pasos[0], p, str(tmp_path)) == (HECHO, "verificado")
+    assert capturado["no_write"] is True  # primera capa: sin tools de edición
+    assert capturado["mode"] == "edit"  # pero con shell: una verificación real corre pytest
+
+
+def test_verificar_descarta_el_veredicto_si_toco_el_arbol(monkeypatch, tmp_path):
+    # Pasó en la validación de E2: el verificador escribió él mismo lo que debía revisar.
+    repo = _repo_con_commit(tmp_path)
+
+    def _fake(*a, **k):
+        (repo / "base.py").write_text("x = 99  # lo 'arreglé' yo\n", encoding="utf-8")
+        return True, "Todo en orden.\nVERIFICADO"
+
+    monkeypatch.setattr(runner.executors, "run_agent", _fake)
+    p = _plan_verificar(repo)
+    estado, nota = runner._h_verificar(p.pasos[0], p, str(repo))
+    assert estado == runner.FALLIDO  # el VERIFICADO no se acepta: lo emitió quien tocó el árbol
+    assert "MODIFICÓ el árbol que auditaba" in nota
+    assert "base.py" in nota  # y dice cuál, para poder revisarlo
+
+
+def test_verificar_no_se_queja_de_los_untracked_que_siembra_pytest(monkeypatch, tmp_path):
+    # Correr la verificación deja .pytest_cache/ y __pycache__/: eso NO es "el verificador editó".
+    repo = _repo_con_commit(tmp_path)
+
+    def _fake(*a, **k):
+        (repo / ".pytest_cache").mkdir()
+        (repo / ".pytest_cache" / "CACHEDIR.TAG").write_text("basura\n", encoding="utf-8")
+        return True, "VERIFICADO"
+
+    monkeypatch.setattr(runner.executors, "run_agent", _fake)
+    p = _plan_verificar(repo)
+    assert runner._h_verificar(p.pasos[0], p, str(repo)) == (HECHO, "verificado")
+
+
+def test_huella_tracked_ignora_untracked_y_es_none_fuera_de_repo(tmp_path):
+    repo = _repo_con_commit(tmp_path)
+    antes = runner._huella_tracked(str(repo))
+    (repo / "nuevo.md").write_text("hola\n", encoding="utf-8")
+    assert runner._huella_tracked(str(repo)) == antes  # un archivo nuevo no mueve la huella...
+    (repo / "base.py").write_text("x = 2\n", encoding="utf-8")
+    assert runner._huella_tracked(str(repo)) != antes  # ...pero modificar lo tracked sí
+    fuera = tmp_path.parent / "sin_git"
+    fuera.mkdir(exist_ok=True)
+    assert runner._huella_tracked(str(fuera)) is None  # sin git: None -> no se compara, no bloquea
+
+
 # --- Auto-evolución (Fase C): reflexionar añade pasos ---
 
 
@@ -414,6 +480,50 @@ def test_insertar_pasos_ids_deps_y_anti_bucle():
     assert n == 1  # el 'reflexionar' generado se descarta (anti-bucle)
     nuevo = p.pasos[1]
     assert nuevo.id == 2 and nuevo.depende_de == [1] and nuevo.tipo == "editar"
+
+
+# --- Deuda #13: lo que propone el modelo se sanea antes de entrar al plan ---
+
+
+def test_insertar_pasos_coerce_el_tipo_desconocido_a_investigar():
+    # un typo del modelo no puede frenar la corrida en _h_desconocido -> bloqueado
+    p = Plan("o", "g", [Step(1, "reflexiona", "reflexionar", "d", [])])
+    n = runner._insertar_pasos(
+        p, p.pasos[0], [{"accion": "editar el worker de colas", "tipo": "editorificar", "done": "d"}]
+    )
+    assert n == 1 and p.pasos[1].tipo == "investigar"
+    assert p.pasos[1].accion == "editar el worker de colas"  # la tarea se conserva tal cual
+
+
+def test_insertar_pasos_descarta_la_accion_que_no_da_para_un_dispatch():
+    p = Plan("o", "g", [Step(1, "reflexiona", "reflexionar", "d", [])])
+    n = runner._insertar_pasos(
+        p,
+        p.pasos[0],
+        [
+            {"accion": "verificar", "tipo": "verificar", "done": "d"},  # el nombre pelado del tipo
+            {"accion": "Investigar.", "tipo": "investigar", "done": "d"},  # idem con ruido
+            {"accion": "hazlo", "tipo": "editar", "done": "d"},  # más corta que _ACCION_MIN
+        ],
+    )
+    assert n == 0 and len(p.pasos) == 1  # nada que corregir sin inventar la tarea: se descartan
+
+
+def test_insertar_pasos_sanea_la_tanda_basura_de_la_validacion_e2():
+    # Los 4 pasos reales que la auto-evolución insertó en el escenario 1 y hubo que quitar a mano.
+    p = Plan("o", "g", [Step(1, "reflexiona", "reflexionar", "d", [])])
+    n = runner._insertar_pasos(
+        p,
+        p.pasos[0],
+        [
+            {"accion": "revisar el estado del repo", "tipo": "investigar", "done": "d"},
+            {"accion": "documentar los helpers de utils", "tipo": "editorificar", "done": "d"},
+            {"accion": "verificar", "tipo": "verificar", "done": "d"},
+            {"accion": "limpiar duplicados de config", "tipo": "refactor", "done": "d"},
+        ],
+    )
+    assert n == 3  # sobrevive todo menos el que no tenía acción
+    assert all(s.tipo in runner.DEFAULT_HANDLERS for s in p.pasos[1:])  # ninguno cae en bloqueado
 
 
 def test_reflexionar_anade_pasos_al_plan(monkeypatch):
@@ -545,6 +655,62 @@ def test_git_status_sensible_al_contenido_en_archivo_ya_sucio(tmp_path):
 
 def test_git_status_none_fuera_de_repo(tmp_path):
     assert runner._git_status(str(tmp_path)) is None  # sin git init -> None (no bloquea)
+# F1 / deuda #17: la huella también debe ver el CONTENIDO de los archivos UNTRACKED. Reescribir uno
+# deja el porcelain idéntico ('?? a.md' == '?? a.md') y no entra en `git diff HEAD` -> falso
+# 'sin efecto en disco' (pasó en la validación de E2: paso 9 reescribiendo APROBACION.md).
+
+
+def _repo_con_commit(tmp_path):
+    """Repo git con un archivo ya commiteado, para que `git diff HEAD` exista."""
+    (tmp_path / "base.py").write_text("x = 1\n", encoding="utf-8")
+    _git(tmp_path, "init")
+    _git(tmp_path, "add", "base.py")
+    _git(tmp_path, "commit", "-m", "init")
+    return tmp_path
+
+
+def test_git_status_sensible_al_contenido_de_untracked(tmp_path):
+    repo = _repo_con_commit(tmp_path)
+    (repo / "APROBACION.md").write_text("secciones heredadas\n", encoding="utf-8")
+    h1 = runner._git_status(str(repo))
+    (repo / "APROBACION.md").write_text("plantilla estricta\n", encoding="utf-8")  # mismo nombre
+    h2 = runner._git_status(str(repo))
+    assert h1 is not None and h2 is not None
+    assert h1.split("\0")[:2] == h2.split("\0")[:2]  # porcelain + diff idénticos: esa es la trampa
+    assert h1 != h2  # el tercer componente (sha256 del untracked) sí se mueve
+
+
+def test_archivos_tocados_no_ve_el_tercer_componente(tmp_path):
+    # el hash va DESPUÉS del segundo \0 justamente para que la extracción de rutas no cambie.
+    repo = _repo_con_commit(tmp_path)
+    (repo / "nuevo.md").write_text("hola\n", encoding="utf-8")
+    (repo / "base.py").write_text("x = 2\n", encoding="utf-8")
+    assert sorted(runner._archivos_tocados(runner._git_status(str(repo)))) == ["base.py", "nuevo.md"]
+
+
+def test_huella_untracked_vacia_sin_untracked_y_respeta_gitignore(tmp_path):
+    repo = _repo_con_commit(tmp_path)
+    assert runner._huella_untracked(str(repo)) == ""  # árbol limpio: nada que hashear
+    (repo / ".gitignore").write_text("secreto.txt\n", encoding="utf-8")
+    (repo / "secreto.txt").write_text("no me mires\n", encoding="utf-8")
+    huella = runner._huella_untracked(str(repo))
+    assert "secreto.txt" not in huella  # --exclude-standard: mismo criterio que el porcelain
+    assert huella.endswith(" .gitignore")  # el .gitignore sí: untracked y no ignorado
+
+
+def test_huella_untracked_cae_a_tamano_cuando_se_acaba_el_presupuesto(tmp_path, monkeypatch):
+    repo = _repo_con_commit(tmp_path)
+    (repo / "grande.bin").write_bytes(b"ab" * 100)
+    monkeypatch.setattr(runner, "_HUELLA_UNTRACKED_BYTES", 10)  # un untracked enorme no se lee
+    assert runner._huella_untracked(str(repo)) == "size:200 grande.bin"
+
+
+def test_huella_untracked_con_ruta_acentuada(tmp_path):
+    repo = _repo_con_commit(tmp_path)
+    (repo / "informe_año.md").write_text("hola\n", encoding="utf-8")
+    huella = runner._huella_untracked(str(repo))
+    assert huella.endswith(" informe_año.md")  # -z: sin las comillas de core.quotepath
+    assert "ilegible" not in huella  # la ruta llegó entera, el archivo se pudo leer
 
 
 # F1: edición sin efecto en disco (git status idéntico antes/después) -> falso 'hecho'.

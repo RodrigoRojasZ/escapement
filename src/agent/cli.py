@@ -302,6 +302,36 @@ def _run_eventos(argv: list[str]) -> None:
 
 # Respuestas que cuentan como "sí" en los prompts interactivos (rescate a rama, aprobación del plan).
 _AFIRMATIVAS = frozenset({"s", "si", "sí", "y", "yes"})
+
+
+def _respuesta(prompt: str) -> str | None:
+    """Pregunta por stdin y devuelve lo tecleado. ``None`` = no hay humano que conteste.
+
+    Unifica los dos modos de "nadie va a responder" que antes se trataban distinto (deuda #14):
+    el guard ``sys.stdin.isatty()`` (cron, pipe) y el ``EOFError`` que ese guard NO atrapa en
+    Windows —un proceso lanzado sin consola recibe ``NUL`` como stdin, que SÍ es un char
+    device, así que ``isatty()`` devuelve True y el ``input()`` muere al leer—. Ambos casos
+    devuelven None y quien llama aplica su default seguro, en vez de reventar con traceback
+    (exit 1) al final de una corrida que salió bien.
+
+    Args:
+        prompt: texto que se muestra antes de leer (igual que ``input``).
+
+    Returns:
+        La línea tecleada SIN normalizar (quien llama hace su ``strip``/``lower``), o ``None``
+        si no hay canal interactivo usable: sin TTY, stdin en EOF, o descriptor cerrado/inválido.
+    """
+    try:
+        if not sys.stdin or not sys.stdin.isatty():
+            return None
+        return input(prompt)
+    except (EOFError, OSError, ValueError):
+        # EOFError: stdin sin datos (background, NUL, heredoc agotado). OSError/ValueError:
+        # descriptor cerrado o inválido (pythonw, servicio, subproceso sin stdin). Ninguno debe
+        # tumbar el comando: son exactamente el caso "desatendido".
+        return None
+
+
 # Estado de un paso -> icono, para las vistas del plan (`ejecutar`, `plan ver`).
 _ICONOS = {"hecho": "✓", "fallido": "✗", "bloqueado": "⏸", "pendiente": "·"}
 
@@ -319,6 +349,33 @@ def _resolve_repo(arg: str) -> str:
     from agent.orchestrator import resolve_repo
 
     return resolve_repo(arg)
+
+
+def _repo_utilizable(repo: str, origen: str) -> bool:
+    """True si ``repo`` es una carpeta existente; si no, explica el porqué e indica que no sigas.
+
+    Deuda #16. ``ejecutar`` resuelve el plan por el SLUG de la ruta
+    (:func:`config.vault_slug` machaca todo lo no alfanumérico a ``-``), así que una ruta con typo
+    cae en el MISMO archivo de plan que la buena —``G:\\repo_x`` y ``G:\\repo-x`` comparten slug—:
+    sin esta validación el plan carga, la corrida arranca, y el primer código que usa ``repo`` de
+    verdad muere feo y varios pasos adentro (``NotADirectoryError``, o un WinError 267 desde un
+    subproceso de git). Peor: la ruta mala se persiste en ``plan.repo`` al pasar por aquí. Fallar
+    de entrada, con la ruta a la vista, cuesta un ``is_dir()``.
+
+    Args:
+        repo: ruta ya resuelta por :func:`_resolve_repo`, o la que el plan recuerda.
+        origen: de dónde salió, para el mensaje (``"'<arg>'"`` o ``"el plan"``).
+
+    Returns:
+        True si es un directorio existente. False —con el diagnóstico ya impreso— si no existe,
+        si es un archivo, o si la ruta ni siquiera es consultable: ``is_dir()`` devuelve False
+        ante cualquier OSError/ValueError (unidad caída, permisos, nombre ilegal), no levanta.
+    """
+    if Path(repo).is_dir():
+        return True
+    print(f"[ejecutar] {origen} apunta a una carpeta que no existe: {repo}")
+    print("  revisa la ruta (o usa una clave de REPOS) y reintenta.")
+    return False
 
 
 def _reporte_traza(plan, repo: str, *, completo: bool, mostrar_vacio: bool = True) -> None:
@@ -352,18 +409,16 @@ def _reporte_traza(plan, repo: str, *, completo: bool, mostrar_vacio: bool = Tru
     if not completo:
         return
     base = runner.default_branch(repo) or "(default)"
-    if not sys.stdin.isatty():
+    resp = _respuesta(
+        f"\n[rescate] ¿traspasar el trabajo a una rama nueva basada en '{base}'? [s/N] "
+    )
+    if resp is None:
         print(
             f"\n[rescate] para traspasar el trabajo a una rama basada en '{base}', re-lanza en una "
             "terminal interactiva y responde 's', o hazlo a mano desde la rama del worktree."
         )
         return
-    resp = (
-        input(f"\n[rescate] ¿traspasar el trabajo a una rama nueva basada en '{base}'? [s/N] ")
-        .strip()
-        .lower()
-    )
-    if resp not in _AFIRMATIVAS:
+    if resp.strip().lower() not in _AFIRMATIVAS:
         print("  ok, lo dejo en el worktree del plan.")
         return
     res = runner.traspasar_a_rama(plan, repo)
@@ -458,8 +513,10 @@ def _aprobar_plan(p: Plan, path: Path, *, saltar: bool) -> bool:
     if not sys.stdin.isatty():
         return True  # desatendido: ejecuta sin preguntar (comportamiento previo intacto)
     _render_plan(p, path, activo=True)
-    resp = input(f"\n[aprobación] ¿ejecuto este roadmap ({len(p.pasos)} pasos)? [s/N] ").strip()
-    if resp.lower() in _AFIRMATIVAS:
+    resp = _respuesta(f"\n[aprobación] ¿ejecuto este roadmap ({len(p.pasos)} pasos)? [s/N] ")
+    if resp is None:
+        return True  # stdin se dijo TTY pero nadie contesta: mismo default que sin TTY
+    if resp.strip().lower() in _AFIRMATIVAS:
         return True
     print(
         "  ok, no ejecuto nada. Replantea con 'escapement objetivo [repo] \"<meta>\"' o ajusta el "
@@ -493,12 +550,15 @@ def _checkpoint_inline(paso: Step, p: Plan, path: Path) -> bool:
     if not config.PLAN_APPROVAL or not sys.stdin.isatty():
         return False  # desatendido: termina con el mensaje de reanudación (comportamiento previo)
     print(f"\n[checkpoint] paso {paso.id} ({paso.estado}): {_una_linea(paso.nota or paso.accion)}")
-    resp = input(
-        "  ¿cómo sigo? [h]echo y continuar · [r]eintentar el paso · [Enter] salir\n"
-        '  ("h <texto>" guarda tu decisión como nota del paso): '
+    resp = (
+        _respuesta(
+            "  ¿cómo sigo? [h]echo y continuar · [r]eintentar el paso · [Enter] salir\n"
+            '  ("h <texto>" guarda tu decisión como nota del paso): '
+        )
+        or ""
     ).strip()
     if not resp:
-        return False
+        return False  # None (nadie contesta) o Enter: salir, el default seguro de siempre
     verbo, _, nota = resp.partition(" ")
     verbo = verbo.lower()
     estados = {"h": "hecho", "hecho": "hecho", "r": "pendiente", "reintentar": "pendiente"}
@@ -584,6 +644,8 @@ def _run_ejecutar(argv: list[str]) -> None:
     )
     repo_arg = cliparse.opt_str(opts, "repo") or (pos[0] if pos else "")
     repo = _resolve_repo(repo_arg) if repo_arg else ""
+    if repo and not _repo_utilizable(repo, f"'{repo_arg}'"):
+        return  # antes de tocar el plan: un typo no debe cargarlo ni pisarle el repo (deuda #16)
     plan_path = planner.plan_slot(repo)  # con repo: su archivo dedicado + lo deja activo
     plan = planner.load_plan(plan_path)
     if plan is None:
@@ -592,6 +654,8 @@ def _run_ejecutar(argv: list[str]) -> None:
         return
     if not repo:
         repo = plan.repo or str(Path.cwd())
+        if not _repo_utilizable(repo, "el plan"):
+            return  # el repo se movió o se borró desde que se planificó
     if plan.repo != repo:
         plan.repo = repo  # recuerda el repo para las próximas reanudaciones
         planner.save_plan(plan, plan_path)

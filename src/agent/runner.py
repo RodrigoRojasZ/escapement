@@ -19,6 +19,7 @@ al mergear tú la rama. Si el repo del plan no es git, se cae al comportamiento 
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -28,6 +29,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 from agent import bus, config, costs, executors, fsutil, local_models, personas, planner
 from agent.planner import Plan, Step
@@ -136,6 +138,72 @@ def _git_run(repo: str, *args: str) -> str | None:
     return r.stdout if r.returncode == 0 else None
 
 
+_HUELLA_UNTRACKED_BYTES = 8 * 1024 * 1024  # techo de lectura por huella (deuda #17)
+
+
+def _huella_untracked(repo: str) -> str:
+    """Marca del CONTENIDO de cada archivo untracked, una línea por archivo. "" si no hay ninguno.
+
+    Deuda #17. Tercer componente de la huella de :func:`_git_status`: ni el porcelain ni
+    ``git diff HEAD`` ven el contenido de un archivo sin trackear —el porcelain imprime ``?? a.md``
+    igual antes y después de reescribirlo, y el diff solo mira lo que el índice conoce—, así que
+    reescribir un archivo que un paso anterior dejó untracked daba huella idéntica y el guard lo
+    marcaba "sin efecto en disco". Pasó en la validación de E2 (escenario 2, paso 9).
+
+    Lista con ``ls-files --others --exclude-standard -z``: el mismo criterio de ignorados que el
+    porcelain, y ``-z`` evita el quoting de ``core.quotepath`` (las rutas con acentos llegan crudas).
+
+    Args:
+        repo: carpeta del repo git, la misma que recibe :func:`_git_status`.
+
+    Returns:
+        Una línea ``"<marca> <ruta>"`` por archivo, ordenadas por ruta para que la huella sea
+        estable. La marca es el sha256 del contenido; ``size:<n>`` si el archivo ya no cabe en el
+        presupuesto de lectura (``_HUELLA_UNTRACKED_BYTES``, para que un ``node_modules/`` sin
+        trackear no vuelva lenta cada comprobación) e ``ilegible`` si desapareció entre el listado
+        y la lectura. "" si git falla o no hay untracked: la huella queda como estaba.
+    """
+    listado = _git_run(repo, "ls-files", "--others", "--exclude-standard", "-z")
+    if not listado:
+        return ""
+    lineas, presupuesto = [], _HUELLA_UNTRACKED_BYTES
+    for rel in sorted(x for x in listado.split("\0") if x):
+        ruta = Path(repo) / rel
+        try:
+            tam = ruta.stat().st_size
+            if tam > presupuesto:
+                marca = f"size:{tam}"  # sin presupuesto: al menos capta el cambio de tamaño
+            else:
+                presupuesto -= tam
+                marca = hashlib.sha256(ruta.read_bytes()).hexdigest()
+        except OSError:
+            marca = "ilegible"  # borrado tras el listado, enlace roto, permiso denegado
+        lineas.append(f"{marca} {rel}")
+    return "\n".join(lineas)
+
+
+def _huella_tracked(repo: str) -> str | None:
+    """Huella del árbol SOLO de lo que git ya conoce: modificados y borrados, sin archivos nuevos.
+
+    Deuda #12: sirve para detectar que un paso de ``verificar`` TOCÓ el árbol que auditaba. Deja
+    fuera los untracked a propósito —al revés que :func:`_git_status`—: una verificación legítima
+    corre ``pytest`` y eso siembra ``.pytest_cache/`` y ``__pycache__/`` en cualquier repo que no los
+    ignore; contarlos como "el verificador escribió" frenaría corridas sanas. Lo que sí importa
+    —reescribir el código que se estaba revisando— es una modificación de algo TRACKED y sí se ve.
+
+    Args:
+        repo: carpeta del worktree donde corre el paso.
+
+    Returns:
+        ``porcelain_sin_untracked + "\\0" + diff``, o None si no es repo git (ahí no se compara nada
+        y ``verificar`` se comporta como antes).
+    """
+    porcelain = _git_run(repo, "status", "--porcelain", "--untracked-files=no")
+    if porcelain is None:
+        return None
+    return porcelain + "\0" + (_git_run(repo, "diff", "HEAD") or "")
+
+
 def _git_status(repo: str) -> str | None:
     """Huella del árbol de trabajo SENSIBLE AL CONTENIDO. None si no es repo git o git falla.
 
@@ -147,6 +215,11 @@ def _git_status(repo: str) -> str | None:
     el CONTENIDO de lo modificado). Solo el porcelain sería ciego al contenido: reeditar un archivo que
     ya estaba modificado deja la lista idéntica y daría un falso 'sin efecto'. El diff cambia con cada
     edición real. ``git diff HEAD`` puede no existir (repo sin commits): en ese caso basta el porcelain.
+
+    Un TERCER componente, tras el segundo ``\\0``, cubre el hueco que quedaba: el contenido de los
+    archivos untracked, que no entran en el diff y cuyo porcelain es idéntico antes y después de
+    reescribirlos (deuda #17, ver :func:`_huella_untracked`). Va al final a propósito:
+    :func:`_archivos_tocados` lee solo hasta el PRIMER ``\\0``, así que no le afecta.
     """
     porcelain = _git_run(repo, "status", "--porcelain")
     if porcelain is None:
@@ -154,7 +227,7 @@ def _git_status(repo: str) -> str | None:
     diff = (
         _git_run(repo, "diff", "HEAD") or ""
     )  # "" si no hay HEAD (repo sin commits): usa solo porcelain
-    return porcelain + "\0" + diff
+    return porcelain + "\0" + diff + "\0" + _huella_untracked(repo)
 
 
 def _tokens(texto: str) -> set[str]:
@@ -471,6 +544,35 @@ class Traspaso:
     motivo: str = ""  # por qué falló ('' si ok)
 
 
+def _fijar_avance(wt: str, plan: Plan) -> tuple[bool, str]:
+    """Commitea en la rama del plan lo que el worktree tenga sin commitear. ``(ok, motivo)``.
+
+    Los pasos ``editar`` dejan su cambio SIN commitear en el worktree; esta función lo fija en la
+    rama para que otra herramienta pueda partir de un árbol limpio: la entrega
+    (:func:`traspasar_a_rama`, que necesita el delta completo en la rama) y el carril ``target`` de
+    :func:`_h_editar` (que despacha a ``optimize`` y lo trae de vuelta con un ff-merge — deuda #11).
+    No tocar el repo real: ``wt`` es siempre el worktree del plan.
+
+    Args:
+        wt: ruta del worktree del plan.
+        plan: el plan en curso; su ``objetivo`` da el mensaje del commit WIP.
+
+    Returns:
+        ``(True, "")`` si no había nada que commitear o si el commit salió; ``(False, motivo)`` si
+        ``wt`` no es un repo git o el commit falló por algo que no sea "nothing to commit".
+    """
+    status = _git_run(wt, "status", "--porcelain")
+    if status is None:
+        return False, "el worktree del plan no es un repo git"
+    if not status.strip():
+        return True, ""
+    _git_try(wt, "add", "-A", "--", ".", ":(exclude)**/__pycache__/**", ":(exclude)*.py[co]")
+    ok, out = _git_try(wt, "commit", "-m", f"escapement(wip): {plan.objetivo[:60]}")
+    if not ok and "nothing to commit" not in out:
+        return False, f"no pude commitear el avance del worktree: {out[:200]}"
+    return True, ""
+
+
 def _git_try(cwd: str, *args: str, stdin: str | None = None) -> tuple[bool, str]:
     """Corre ``git <args>`` en ``cwd`` y devuelve ``(ok, stdout+stderr)``. Nunca lanza.
 
@@ -527,14 +629,9 @@ def traspasar_a_rama(plan: Plan, repo: str, *, base: str = "", dest: str = "") -
     wt = plan.workdir
     if not wt or not os.path.isdir(wt) or not plan.rama:
         return Traspaso(False, motivo="el plan no tiene un worktree git activo")
-    status = _git_run(wt, "status", "--porcelain")
-    if status is None:
-        return Traspaso(False, motivo="el worktree del plan no es un repo git")
-    if status.strip():  # asegura que nada quede sin commitear en la rama del plan
-        _git_try(wt, "add", "-A", "--", ".", ":(exclude)**/__pycache__/**", ":(exclude)*.py[co]")
-        ok, out = _git_try(wt, "commit", "-m", f"escapement(wip): {plan.objetivo[:60]}")
-        if not ok and "nothing to commit" not in out:
-            return Traspaso(False, motivo=f"no pude commitear el avance del worktree: {out[:200]}")
+    ok, motivo = _fijar_avance(wt, plan)  # nada queda sin commitear en la rama del plan
+    if not ok:
+        return Traspaso(False, motivo=motivo)
     base = base or default_branch(repo)
     if not base:
         return Traspaso(False, motivo="no pude determinar la rama por defecto del repo")
@@ -701,18 +798,39 @@ def _h_ejecutar(step: Step, plan: Plan, repo: str) -> tuple[str, str]:
 
 
 def _h_verificar(step: Step, plan: Plan, repo: str) -> tuple[str, str]:
+    """Verifica el ``done`` del paso SIN poder editar lo que audita (deuda #12).
+
+    Necesita shell —una verificación real corre ``pytest``, ``py_compile``, un script—, así que no
+    puede ir por ``mode="read"``. Lo que se cierra es la ESCRITURA, en dos capas: ``no_write=True``
+    le quita las tools de edición al dispatch, y como eso no cubre un ``echo > archivo`` por shell,
+    se compara la huella de lo tracked antes/después. Si el verificador modificó el árbol, el
+    veredicto no vale (en la validación de E2 uno escribió él mismo los docstrings que debía
+    revisar y reportó ``verificado``): el paso queda FALLIDO con la evidencia.
+    """
+    work = _workdir(plan, repo)
+    antes = _huella_tracked(work)
     # Autónomo: Claude corre la verificación del 'done' y su ÚLTIMA LÍNEA es el veredicto.
     ok, out = executors.run_agent(
         personas.system_for(step.tipo, repo, step.persona)
         + f"Verifica de forma autónoma que se cumple: {step.done}. Corre lo necesario y que tu ÚLTIMA "
-        f"LÍNEA sea exactamente VERIFICADO (si pasa) o FALLO seguido del motivo (si no)."
+        f"LÍNEA sea exactamente VERIFICADO (si pasa) o FALLO seguido del motivo (si no). "
+        f"NO edites ningún archivo: solo observa y reporta."
         + _context(step, plan),
-        cwd=_workdir(plan, repo),
+        cwd=work,
         mode="edit",
+        no_write=True,
         model=config.model_for("verificar", step.persona),
     )
     if not ok:
         return FALLIDO, _nota_fallo(out, "no se pudo verificar")
+    despues = _huella_tracked(work)
+    if antes is not None and despues is not None and antes != despues:
+        tocados = ", ".join(_archivos_tocados(despues)[:6]) or "(sin detalle)"
+        return FALLIDO, (
+            "veredicto descartado: el verificador MODIFICÓ el árbol que auditaba "
+            f"(archivos sucios ahora: {tocados}). Revisa el cambio antes de dar el paso por hecho."
+            f"\n{(out or '').strip()}"
+        )[:_NOTE_LIMIT]
     # Miramos SOLO la última línea (el veredicto): así menciones de "fallo(s)" en el análisis no
     # tumban un verificar que en realidad pasó.
     lineas = [ln.strip() for ln in (out or "").strip().splitlines() if ln.strip()]
@@ -734,15 +852,58 @@ def _h_investigar(step: Step, plan: Plan, repo: str) -> tuple[str, str]:
     )
 
 
-def _h_editar(step: Step, plan: Plan, repo: str) -> tuple[str, str]:
-    target = _target(step)
-    if target:
-        from agent.orchestrator import optimize
+def _editar_target(step: Step, plan: Plan, repo: str, target: str) -> tuple[str, str]:
+    """Carril ``target`` de :func:`_h_editar`: ``optimize`` sobre el WORKTREE del plan (deuda #11).
 
-        res = optimize(repo, step.accion + _context(step, plan), target)
+    ``optimize`` monta su propio worktree efímero y deja el refactor en una rama
+    ``escapement/optimiza-…``, verificado y juzgado. Eso es justo lo que queremos de un archivo
+    concreto —pero antes se lo pedíamos sobre el **repo real**: la rama nacía de la rama del repo
+    (no del plan), así que el paso no veía lo que habían editado los pasos previos y los siguientes
+    no veían lo que editó él. En la validación de E2 un ``[verificar]`` falló honestamente contra el
+    worktree y frenó la corrida; hubo que traer el archivo a mano.
+
+    Ahora el carril encadena en la rama del plan: (1) ``_fijar_avance`` commitea lo que los pasos
+    anteriores dejaron sin commitear —si no, ``optimize`` partiría del último commit y editaría una
+    versión vieja del target—; (2) ``optimize`` corre con el worktree como repo, así que su base es
+    la rama del plan; (3) un ``merge --ff-only`` trae el commit resultante al worktree, y los pasos
+    siguientes lo ven. El ff es siempre posible: la rama salió del HEAD que acabamos de fijar y
+    trae un commit encima.
+
+    ``make_pr=False`` a propósito: la base sería la rama del plan, que no está en el remoto, y la
+    entrega del plan es :func:`traspasar_a_rama`, no un PR por paso. La rama de ``optimize`` no se
+    borra: si el ff-merge falla, es donde sigue vivo el trabajo, y la nota la menciona.
+
+    Sin worktree del plan (repo no-git, o el montaje de S2 falló) se mantiene el comportamiento
+    anterior —``optimize`` sobre ``repo``, con PR—: ahí no hay continuidad que preservar.
+    """
+    from agent.orchestrator import optimize
+
+    directiva = step.accion + _context(step, plan)
+    work = _workdir(plan, repo)
+    if work == repo:  # sin worktree del plan: carril de siempre (con PR)
+        res = optimize(repo, directiva, target)
         return (
             (HECHO, f"PR: {res.pr_url or res.verdict}") if res.verified else (FALLIDO, res.verdict)
         )
+    ok, motivo = _fijar_avance(work, plan)
+    if not ok:
+        return FALLIDO, f"no pude fijar el avance del plan antes de optimizar {target}: {motivo}"
+    res = optimize(work, directiva, target, make_pr=False)
+    if not res.verified:
+        return FALLIDO, res.verdict
+    traido, out = _git_try(work, "merge", "--ff-only", res.branch)
+    if not traido:
+        return FALLIDO, (
+            f"{target} se optimizó y verificó, pero el cambio NO entró al worktree del plan "
+            f"(el trabajo está intacto en la rama {res.branch}): {out[:200]}"
+        )[:_NOTE_LIMIT]
+    return HECHO, f"aplicado en el worktree del plan: {res.verdict} (rama {res.branch})"[:_NOTE_LIMIT]
+
+
+def _h_editar(step: Step, plan: Plan, repo: str) -> tuple[str, str]:
+    target = _target(step)
+    if target:
+        return _editar_target(step, plan, repo, target)
     # Sin archivo concreto: en modo autónomo el especialista desglosa y edita los que apliquen.
     # Este carril no pasa por el verify de optimize, así que comprobamos el EFECTO EN DISCO
     # nosotros: una edición que no cambia el árbol de trabajo es un falso 'hecho', diga lo que
@@ -1045,10 +1206,24 @@ def _json_tiene_lista(out: str, clave: str) -> bool:
     return isinstance(data, dict) and isinstance(data.get(clave), list)
 
 
+_ACCION_MIN = 8  # caracteres mínimos de una acción generada (deuda #13)
+
+
 def _insertar_pasos(plan: Plan, tras: Step, nuevos: list[dict]) -> int:
     """Añade pasos nuevos al plan con ids únicos, dependientes de ``tras`` (corren después de él).
 
     Descarta pasos 'reflexionar' generados (evita el bucle de re-planning infinito).
+
+    Deuda #13: lo que llega aquí lo escribió un modelo (auto-evolución y replanificación entran
+    por la misma puerta), así que además se sanea. El ``tipo`` se contrasta contra
+    :data:`DEFAULT_HANDLERS` y un desconocido se **coerce** a ``investigar`` en vez de colarse: sin
+    esto acababa en :func:`_h_desconocido` -> paso ``bloqueado``, y una corrida desatendida se
+    frenaba en seco por un typo del modelo (en la validación de E2 entraron ``editorificar`` y
+    ``refactor``). La ``accion`` en cambio se **descarta** si no da para un dispatch —muy corta, o
+    el nombre pelado de un tipo, como el ``[verificar] verificar`` de esa misma corrida—: ahí no
+    hay nada que corregir sin inventar la tarea. La whitelist es la de los handlers por defecto;
+    un ``run_plan(..., handlers=...)`` con tipos propios los verá coercidos (limitación conocida:
+    esta función no recibe el mapa de handlers efectivo).
     """
     max_id = max((s.id for s in plan.pasos), default=0)
     anadidos = 0
@@ -1056,8 +1231,12 @@ def _insertar_pasos(plan: Plan, tras: Step, nuevos: list[dict]) -> int:
         tipo = str(raw.get("tipo", "investigar")).strip().lower()
         if tipo == "reflexionar":
             continue
+        if tipo not in DEFAULT_HANDLERS:
+            tipo = "investigar"  # typo del modelo: investigar es el tipo seguro (no edita nada)
         accion = str(raw.get("accion", "")).strip()
         done = str(raw.get("done", "")).strip()
+        if len(accion) < _ACCION_MIN or accion.strip(" .:-").lower() in DEFAULT_HANDLERS:
+            continue  # ni un dispatch se puede armar con esto
         # F4: la auto-evolución vuelve a proponer pasos que ya existen en el plan (una reflexión
         # posterior redescubre lo mismo). Descartamos los que se solapan fuerte con un paso previo
         # para no re-ejecutar trabajo ya hecho ni inflar el roadmap con duplicados.

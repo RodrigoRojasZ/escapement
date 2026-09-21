@@ -27,13 +27,23 @@ from agent import config, fsutil
 
 # Un builder recibe (bin, prompt) y devuelve (argv, stdin_text): stdin_text es el prompt por
 # stdin, o None si el prompt ya va embebido en argv como argumento. Los builders de EDICIÓN
-# aceptan además ``no_shell`` keyword (S3): confinar el dispatch a tools sin shell.
+# aceptan además los keyword ``no_shell`` (S3: sin tools de shell) y ``no_write`` (deuda #12:
+# sin tools de escritura).
 Builder = Callable[[str, str], "tuple[list[str], str | None]"]
 
 # Canal interno run_agent -> guard_cli (S3): el hook hereda el env del CLI, así que esta var
 # le dice "este dispatch NO debe usar shell" con la garantía de los hooks (que SÍ corren bajo
 # --dangerously-skip-permissions), sin depender de la semántica de --disallowedTools.
 DENY_SHELL_ENV = "AGENT_DENY_SHELL"
+
+# Gemelo del anterior para la ESCRITURA (deuda #12): un paso de ``verificar`` necesita shell
+# (corre pytest/py_compile), así que no puede ir por ``mode="read"``, pero tampoco debe poder
+# editar el árbol que audita —si "arregla" lo que iba a revisar y reporta VERIFICADO, el
+# falso positivo es justo el que la evaluación global quería eliminar—.
+DENY_WRITE_ENV = "AGENT_DENY_WRITE"
+
+# Tools de edición de archivos de Claude Code, para el ``--disallowedTools`` de ``no_write``.
+_WRITE_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit"]
 
 # Observer opcional de instrumentación (R3): si está seteado, run_agent lo llama con
 # (mode, prompt, output) tras CADA dispatch completado —el sink único al executor—. Default None =
@@ -104,11 +114,15 @@ def _guard_settings_path() -> str:
 
 
 def _claude_edit(
-    binp: str, prompt: str, no_shell: bool = False, model: str = ""
+    binp: str, prompt: str, no_shell: bool = False, no_write: bool = False, model: str = ""
 ) -> tuple[list[str], str | None]:
     # print mode + permisos de edición; prompt por stdin (evita el truncado del arg multi-línea).
     # --settings inyecta el hook PreToolUse del guard (ver _guard_settings_path).
-    # no_shell (S3): capa declarativa; la garantía real es el hook vía DENY_SHELL_ENV.
+    # no_shell/no_write: capa declarativa; la garantía real es el hook vía DENY_*_ENV. Van en un
+    # solo --disallowedTools porque el flag toma varios nombres y repetirlo pisa el anterior.
+    denegadas = (["Bash", "PowerShell"] if no_shell else []) + (
+        _WRITE_TOOLS if no_write else []
+    )
     return [
         binp,
         "-p",
@@ -116,7 +130,7 @@ def _claude_edit(
         "--settings",
         _guard_settings_path(),
         *_model_flag(model),
-        *(["--disallowedTools", "Bash", "PowerShell"] if no_shell else []),
+        *(["--disallowedTools", *denegadas] if denegadas else []),
     ], prompt
 
 
@@ -129,10 +143,11 @@ def _claude_read(binp: str, prompt: str, model: str = "") -> tuple[list[str], st
 
 
 def _agy_edit(
-    binp: str, prompt: str, no_shell: bool = False, model: str = ""
+    binp: str, prompt: str, no_shell: bool = False, no_write: bool = False, model: str = ""
 ) -> tuple[list[str], str | None]:
     # agy -p "<prompt>" --headless --approve all: auto-aprueba writes (seguro en el worktree).
-    # no_shell/model se ignoran: agy no tiene deny de tools ni selección de modelo (ver run_agent).
+    # no_shell/no_write/model se ignoran: agy no tiene deny de tools ni selección de modelo
+    # (ver run_agent).
     return [binp, "-p", prompt, "--headless", "--approve", "all"], None
 
 
@@ -141,9 +156,10 @@ def _agy_read(binp: str, prompt: str, model: str = "") -> tuple[list[str], str |
 
 
 def _cursor_edit(
-    binp: str, prompt: str, no_shell: bool = False, model: str = ""
+    binp: str, prompt: str, no_shell: bool = False, no_write: bool = False, model: str = ""
 ) -> tuple[list[str], str | None]:
-    # no_shell/model se ignoran: cursor no tiene deny de tools ni selección de modelo (ver run_agent).
+    # no_shell/no_write/model se ignoran: cursor no tiene deny de tools ni selección de modelo
+    # (ver run_agent).
     return [binp, "-p", prompt, "--force", "--output-format", "text"], None
 
 
@@ -182,6 +198,7 @@ def run_agent(
     executor: Executor | None = None,
     allow_secrets: bool = False,
     no_shell: bool = False,
+    no_write: bool = False,
     model: str = "",
 ) -> tuple[bool, str]:
     """Corre el executor con ``prompt`` en ``cwd``. Devuelve ``(ok, salida)``.
@@ -202,6 +219,13 @@ def run_agent(
             necesitan shell y siguen cubiertos por el guard (S1) + worktree (S2). Con claude
             se aplica por dos capas (env ``AGENT_DENY_SHELL`` que honra el hook del guard, y
             ``--disallowedTools``); agy/cursor no tienen mecanismo equivalente y lo ignoran.
+        no_write: confina el dispatch a tools sin ESCRITURA de archivos (deuda #12): para
+            ``verificar``, que necesita shell para correr la comprobación pero no debe poder
+            editar el árbol que audita. Default False (no-op). Mismas dos capas que
+            ``no_shell`` (env ``AGENT_DENY_WRITE`` + ``--disallowedTools``) y la misma
+            limitación: agy/cursor lo ignoran. OJO: no cierra la escritura VÍA SHELL (un
+            ``echo > x`` sigue siendo Bash), por eso ``_h_verificar`` además compara la huella
+            de disco antes/después.
         model: id de modelo para este dispatch (tiering por tarea, ``config.model_for``). ``""``
             (default) = sin ``--model`` propio → cae al override global ``AGENT_EXECUTOR_MODEL``
             y, si tampoco, al default del CLI (comportamiento previo). Solo claude lo aplica;
@@ -223,9 +247,16 @@ def run_agent(
     ex = executor or resolve()
     binp = shutil.which(ex.bin_name) or ex.bin_name
     if mode == "edit":
-        cmd, stdin = ex.build_edit(binp, prompt, no_shell=no_shell, model=model)
+        cmd, stdin = ex.build_edit(
+            binp, prompt, no_shell=no_shell, no_write=no_write, model=model
+        )
     else:
         cmd, stdin = ex.build_read(binp, prompt, model=model)
+    marcas = {}  # canal env -> hook del guard; vacío = hereda el env del padre tal cual
+    if no_shell:
+        marcas[DENY_SHELL_ENV] = "1"
+    if no_write:
+        marcas[DENY_WRITE_ENV] = "1"
     try:
         r = subprocess.run(
             cmd,
@@ -236,7 +267,7 @@ def run_agent(
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
-            env={**os.environ, DENY_SHELL_ENV: "1"} if no_shell else None,
+            env={**os.environ, **marcas} if marcas else None,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
         return False, f"executor {ex.name} falló: {exc}"

@@ -53,6 +53,10 @@ Cómo trabaja una sesión de Claude (o el propio Escapement) sobre este repo:
 2. **Done verificable antes de empezar** (principio de VISION): si el ítem no tiene criterio
    medible, definirlo primero.
 3. **Un PR por deuda.** Rama feature, nunca commit directo a `master`. Nunca mergear.
+   *Excepción vigente desde 2026-09-20:* cuando la sesión la conduce Claude Code con las reglas
+   globales de Rodrigo, manda **una rama y un PR por sesión y repo**, con cada deuda como commit
+   sucesivo (varios PRs por hora sobre el mismo repo dispersan el trabajo y ya hicieron perder
+   cambios). El resto de la regla no cambia: rama feature, nunca commit directo, nunca mergear.
 4. **El done incluye el registro:** actualizar DEUDAS.md (y este doc si cierra una etapa) en el
    mismo PR. Deudas nuevas descubiertas → a DEUDAS.md en el momento, no a docs nuevos.
 5. **Checkpoint humano** solo en divergencias de rumbo o cambios de comportamiento observable; lo
@@ -63,9 +67,15 @@ Cómo trabaja una sesión de Claude (o el propio Escapement) sobre este repo:
 ## 3 · Plan por etapas
 
 ```
-E0 higiene ──► E1 telemetría/control ──► E2 evaluador global (Fase C) ──► E3 ciclo auto-guiado
-   (1 sesión)      (2–3 sesiones)             (la deuda grande, #7)          (innovación)
+E0 higiene ─► E1 telemetría/control ─► E2 evaluador global (Fase C) ─► E4 saneo #11–#17 ─► E3 ciclo auto-guiado
+  (1 sesión)     (2–3 sesiones)            (la deuda grande, #7)        (3 tandas, en curso)     (innovación)
 ```
+
+**E4 nace después de E3 en el papel, pero corre antes.** Son las deudas que destapó la
+validación en real de E2 (#11–#17): ninguna bloquea el ciclo evaluar→replanificar, pero E3 es
+dogfooding **desatendido** sobre este mismo repo y las pisaría de inmediato —un prompt que
+revienta sin TTY, un verificador que puede escribir lo que verifica, una huella de disco ciega—.
+Se mantiene el número alto para no renumerar las etapas ya cerradas ni las referencias a ellas.
 
 ### E0 · Higiene del registro — ✅ completada (2026-08-26, 1 sesión)
 
@@ -127,6 +137,39 @@ carril target, verificador con `mode="edit"`, calidad de pasos insertados, guard
 Windows, contaminación del journal desde tests, repo sin validar en `ejecutar`, guard de efecto
 ciego a untracked). Ninguna bloquea el ciclo evaluar→replanificar. **Fase C ✅.**
 
+### E4 · Saneo de lo que destapó la validación de E2 (#11–#17) — en curso
+
+Tres tandas, ordenadas por lo que le duele al carril desatendido. Cada tanda es independiente de
+la siguiente: si la sesión se corta, lo cerrado queda cerrado.
+
+**E4.1 · Guardas del carril desatendido — ✅ completada (2026-09-20, commit `b5aed66`)**
+
+| Ítem | Deuda | Done verificable | Estado |
+|---|---|---|---|
+| `_respuesta()` unifica *nadie contesta*: sin TTY, `EOFError`, descriptor roto → `None` y default seguro | #14 | una corrida en background termina en 0, sin traceback tras el trabajo hecho | ✅ 11 tests (TTY / sin TTY / EOF / stdin cerrado / `None`) |
+| Fixture `autouse` en `tests/conftest.py` que redirige `config.EVENTS` a `tmp_path` | #15 | la suite completa no añade una sola línea a `data/events.jsonl` | ✅ 664 líneas antes y después (antes: +592 por corrida) |
+| `_repo_utilizable()` valida el repo en las dos vías de `_run_ejecutar` (argumento y `plan.repo`) | #16 | una ruta con typo que comparte slug no carga el plan, no lo pisa y no corre | ✅ 2 tests que fallan sin el parche |
+
+**E4.2 · El paso no miente sobre su efecto — ✅ completada (2026-09-20)**
+
+| Ítem | Deuda | Done verificable | Estado |
+|---|---|---|---|
+| `no_write` en `run_agent` (espejo de `no_shell`: env `AGENT_DENY_WRITE` + `--disallowedTools Write Edit MultiEdit NotebookEdit`, honrado por `guard_cli`) y `_h_verificar` despachando con él | #12 | un verificador que intente escribir es bloqueado; el paso queda FALLIDO si el árbol cambió durante la verificación | ✅ 14 tests (12 fallan sin el parche); la huella del antes/después es de lo **tracked**, para no confundir el `.pytest_cache/` que siembra verificar |
+| Huella de disco sensible al **contenido** de untracked: tercer componente con el sha256 de `git ls-files --others --exclude-standard`, fuera del primer `\0` para no romper `_rutas_de_huella` | #17 | reescribir un untracked sin cambiar su nombre mueve la huella | ✅ 5 tests, commit `4954776`; `_archivos_tocados` intacto (lee hasta el primer `\0`) |
+| `_insertar_pasos` valida `tipo` contra las claves de `DEFAULT_HANDLERS` (desconocido → `investigar`) y un mínimo de calidad de la acción | #13 | un paso inventado con `tipo` basura no se cuela; `run_plan(..., handlers=...)` sigue funcionando | ✅ 3 tests (fallan sin el parche); tipo malo se coerce, acción inservible se descarta |
+
+Depende de E4.1 sólo en lo práctico (correr la suite desatendida sin que el journal ni los prompts
+estorben), no en el código.
+
+**E4.3 · Continuidad del worktree en el carril target — pendiente**
+
+| Ítem | Deuda | Done verificable |
+|---|---|---|
+| `_h_editar` con `target` debe editar el worktree del plan, no el repo real | #11 | un paso con target deja sus cambios en `plan.workdir`; el repo real no se toca |
+
+Es la de más riesgo de las que destapó E2 (toca el aislamiento S2), así que va sola y al final:
+con E4.2 cerrada es la **única** deuda abierta del repo.
+
 ### E3 · Ciclo auto-guiado — innovación
 
 Con E2 cerrado, el loop `objetivo → plan → ejecutar → evaluar → replanificar → PR` está completo.
@@ -147,7 +190,7 @@ La innovación es apuntarlo hacia adentro:
 
 | Métrica | Fuente | Hoy | Meta |
 |---|---|---|---|
-| Deudas abiertas en DEUDAS.md | el propio doc | 5 tras E0: #4 #6 #7 #8 #10 | tendencia a la baja, edad < 1 mes |
+| Deudas abiertas en DEUDAS.md | el propio doc | 1 tras E4.2: #11 (eran 4 tras E4.1; 5 tras E0: #4 #6 #7 #8 #10) | tendencia a la baja, edad < 1 mes |
 | Docs sin marca de vigencia | `docs/` | 0 tras E0 | 0 |
 | Planes cerrados por criterio (vs conteo) | topics `plan.eval` | 0% (no existe) | 100% post-E2 |
 | PRs con check de CI | GitHub | 0% (no hay CI) | 100% post-E1 |

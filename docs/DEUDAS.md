@@ -1,6 +1,9 @@
 # Deudas técnicas de Escapement — 2026-07-31
 
-> **Estado: vigente** — única lista viva de deudas del repo. Última revisión: 2026-08-28 (Etapa 2
+> **Estado: vigente** — única lista viva de deudas del repo. Última revisión: 2026-09-20 (Etapa
+> E4.2 del [plan auto-guiado](PLAN_AUTOGUIADO.md) **completada**: cerradas **#17**, **#12** y
+> **#13**. Deuda abierta: **#11** (única, y es la de E4.3). Antes: 2026-09-20 (E4.1: cerradas
+> **#14, #15 y #16** en el commit `b5aed66`). Antes: 2026-08-28 (Etapa 2
 > del [plan auto-guiado](PLAN_AUTOGUIADO.md) **completada**: cerrada #7 — ciclo
 > evaluar→replanificar entregado en PRs #10/#11/#12 y validado en real; alta de #11–#17, hallazgos
 > de esa validación. Antes: E1 cerró #10, #4, #6 y #8; E0 cerró #3, #5 y #9 con alta de #10.
@@ -329,10 +332,14 @@ honestamente contra el worktree y frenó la corrida en checkpoint — hubo que t
 el `optimize`, la rama resultante se fusione al worktree del plan antes de continuar). Mientras
 tanto, el carril target además usa `repo` sin validar — ver #16.
 
-### 12. `_h_verificar` despacha con `mode="edit"`: el verificador puede escribir lo que verifica
+### 12. `_h_verificar` despacha con `mode="edit"`: el verificador puede escribir lo que verifica — ✅ cerrada (2026-09-20)
 
 **Impacto: alto · Esfuerzo: bajo** · *Registrada el 2026-08-28: hallazgo de la validación en real
 de E2 (deuda #7).*
+
+> **Cerrada.** Dos capas: `no_write` le quita las tools de edición al dispatch y una huella del
+> árbol antes/después descarta el veredicto si igual lo tocó. Detalle abajo, después del
+> diagnóstico original.
 
 `_h_verificar` ([runner.py:702](../src/agent/runner.py#L702)) despacha al agente con `mode="edit"`
 ([runner.py:710](../src/agent/runner.py#L710)), mientras que `_h_investigar` usa `mode="read"`
@@ -349,10 +356,36 @@ paso 3 hubiera funcionado.
 ejecución de comandos (un verificar legítimo corre `pytest`/`py_compile`), decidir mirando qué
 permite cada modo del executor: lo indispensable es que no pueda **editar** el árbol que audita.
 
-### 13. `_insertar_pasos` no valida `tipo` ni calidad mínima de los pasos de la auto-evolución
+**Arreglo aplicado (2026-09-20, E4.2):** se mantiene `mode="edit"` —una verificación real corre
+`pytest`, y `mode="read"` le quitaría el shell— y se cierra la **escritura**, en dos capas.
+
+1. **Permisos del dispatch:** `no_write` en
+   [`run_agent`](../src/agent/executors.py), calcado de `no_shell`: marca
+   `AGENT_DENY_WRITE=1` en el env del subproceso (que el hook
+   [`guard_cli`](../src/agent/security/guard_cli.py) hereda y usa para denegar `Write`, `Edit`,
+   `MultiEdit` y `NotebookEdit`) y pasa `--disallowedTools` al CLI. Las dos marcas se acumulan sin
+   pisarse; `agy`/`cursor` siguen ignorando el kwarg (misma limitación documentada de `no_shell`).
+2. **Comprobación en disco:** eso no cubre un `echo > archivo` por shell, así que
+   [`_h_verificar`](../src/agent/runner.py) compara `_huella_tracked(work)` antes y después del
+   dispatch. Si difieren, el veredicto se descarta: el paso queda **FALLIDO** con los archivos
+   sucios en la nota, aunque el agente haya dicho `VERIFICADO`.
+
+`_huella_tracked` deja fuera los untracked a propósito —al revés que `_git_status`—: una
+verificación legítima corre `pytest` y siembra `.pytest_cache/`/`__pycache__/`, y contar eso como
+"el verificador editó" frenaría corridas sanas. Reescribir el código auditado sí es una
+modificación de algo tracked y sí se ve. **Verificación:** 14 tests nuevos (4 del builder y el env
+en `test_executors.py`, 6 del hook en `test_guard.py`, 4 de `_h_verificar`/`_huella_tracked` en
+`test_runner.py`); 12 de ellos fallan con el `src/` del commit anterior (`4954776`) y pasan con el
+parche — los 2 que no son los que fijan que el default sigue siendo no-op. Suite completa: 912
+pasando.
+
+### 13. `_insertar_pasos` no valida `tipo` ni calidad mínima de los pasos de la auto-evolución — ✅ cerrada (2026-09-20)
 
 **Impacto: medio · Esfuerzo: bajo** · *Registrada el 2026-08-28: hallazgo de la validación en real
 de E2 (deuda #7).*
+
+> **Cerrada.** El `tipo` desconocido se coerce a `investigar` y la acción que no da para un
+> dispatch se descarta. Detalle abajo, después del diagnóstico original.
 
 `_insertar_pasos` ([runner.py:943](../src/agent/runner.py#L943)) solo descarta `reflexionar`
 (anti-bucle) y duplicados; acepta cualquier otro `tipo` y cualquier `accion`. Un tipo que no está
@@ -368,10 +401,33 @@ bloqueado y hubo que quitar los cuatro a mano con `escapement plan quitar`.
 `investigar`, y un umbral mínimo para `accion` (p. ej. largo mínimo y distinta del propio tipo).
 Aplica igual a los pasos que llegan por replanificación (#7), que entran por la misma función.
 
-### 17. El guard de efecto en disco es ciego al contenido de archivos untracked
+**Arreglo aplicado (2026-09-20, E4.2):** dos guardas nuevas en
+[`_insertar_pasos`](../src/agent/runner.py), después del anti-bucle de `reflexionar` y antes del
+anti-duplicados, así que cubren por igual a la auto-evolución y a la replanificación (entran por
+la misma función). Tratan distinto los dos defectos porque no son el mismo problema:
+
+- **`tipo` desconocido → se coerce a `investigar`** (no se descarta): la tarea que propuso el
+  modelo puede ser buena y solo estar mal etiquetada, e `investigar` es el tipo seguro —no edita
+  nada—. Lo que se elimina es el paso `bloqueado` por `_h_desconocido` que frenaba en seco una
+  corrida desatendida (`editorificar`, `refactor`).
+- **`accion` inservible → se descarta** el paso entero: más corta que `_ACCION_MIN` (8) o igual al
+  nombre pelado de un tipo, ignorando puntuación (el `[verificar] verificar` de la validación).
+  Ahí no hay nada que corregir sin inventar la tarea.
+
+**Limitación conocida:** la whitelist es la de `DEFAULT_HANDLERS`; un `run_plan(..., handlers=...)`
+con tipos propios los verá coercidos, porque esta función no recibe el mapa de handlers efectivo
+(queda documentado en su docstring). **Verificación:** 3 tests nuevos en `test_runner.py` —uno de
+ellos replica la tanda de 4 pasos basura que hubo que quitar a mano en el escenario 1 y comprueba
+que ahora sobreviven 3, todos con un tipo que sí tiene handler—; los 3 fallan sin el parche. Suite
+completa: 915 pasando, `ruff` limpio.
+
+### 17. El guard de efecto en disco es ciego al contenido de archivos untracked — ✅ cerrada (2026-09-20)
 
 **Impacto: medio · Esfuerzo: bajo** · *Registrada el 2026-08-28: hallazgo de la validación en real
 de E2 (deuda #7).*
+
+> **Cerrada.** Tercer componente de la huella con el sha256 de cada untracked, al final para no
+> mover lo que ya consumía `_archivos_tocados`. Detalle abajo, después del diagnóstico original.
 
 `_git_status` ([runner.py:139](../src/agent/runner.py#L139)) combina `git status --porcelain` +
 `git diff HEAD` como huella "sensible al contenido" para que `_h_editar` detecte falsos `hecho`.
@@ -388,6 +444,19 @@ archivo". Falso negativo: frenó la corrida en checkpoint por un cambio que sí 
 **Arreglo propuesto:** incluir el contenido de los untracked en la huella — p. ej. sumar
 `git status --porcelain` + hash del contenido de cada `??` (o `git add -N` efímero para que el
 diff los vea). Con eso el mismo guard cubre ambos carriles sin cambiar su semántica.
+
+**Arreglo aplicado (2026-09-20, E4.2, commit `4954776`):** `_huella_untracked` lista con
+`git ls-files --others --exclude-standard -z` —mismo criterio de ignorados que el porcelain, y
+`-z` evita el quoting de `core.quotepath` en rutas con acentos— y devuelve una línea
+`"<sha256> <ruta>"` por archivo, ordenadas para que la huella sea estable. `_git_status` la suma
+como **tercer** componente, tras el segundo `\0`: `_archivos_tocados` lee solo hasta el primero,
+así que la extracción de rutas no cambia (hay un test que lo fija). Techo de lectura de 8 MiB por
+huella (`_HUELLA_UNTRACKED_BYTES`): pasado el presupuesto la marca cae a `size:<n>`, que aún capta
+un cambio de tamaño, para que un `node_modules/` sin trackear no vuelva lenta cada comprobación;
+`ilegible` si el archivo desaparece entre el listado y la lectura. **Verificación:** 5 tests nuevos
+en `test_runner.py` —el central reescribe un untracked sin renombrarlo y comprueba que el porcelain
+y el diff quedan idénticos (`h1.split("\0")[:2] == h2.split("\0")[:2]`, esa era la trampa) mientras
+la huella completa sí se mueve—; los 4 que ejercen el código nuevo fallan con el `src/` anterior.
 
 ---
 
@@ -465,10 +534,14 @@ porque `test_local_models.py` importa `openai` de verdad) y sin `escapement.toml
 passed, 1 skipped. Nada quedó excluido con marcas: la suite ya era 100% headless. Único ajuste de
 deps: `numpy` se añadió también al grupo `dev` (los tests de voz construyen buffers falsos con él).
 
-### 14. El guard no-TTY está roto en Windows: EOFError en los tres prompts interactivos
+### 14. El guard no-TTY está roto en Windows: EOFError en los tres prompts interactivos — ✅ cerrada (2026-09-20)
 
 **Impacto: alto · Esfuerzo: bajo** · *Registrada el 2026-08-28: hallazgo de la validación en real
 de E2 (deuda #7).*
+
+> **Cerrada.** Los tres prompts pasan por `_respuesta()`, que devuelve `None` cuando no hay
+> humano y deja que cada llamador aplique su default seguro. Detalle abajo, después del
+> diagnóstico original.
 
 Los tres prompts del CLI se protegen con `sys.stdin.isatty()` — el rescate de `_reporte_traza`
 ([cli.py:355](../src/agent/cli.py#L355)), `_aprobar_plan`
@@ -488,10 +561,23 @@ stdin (`printf "" | escapement ...`) — un pipe no es char device y el guard s�
 que el no-TTY (el default seguro que ya existe). Es prerequisito práctico de E3: el ciclo
 auto-guiado corre headless.
 
-### 15. Los tests de `run_plan` contaminan el journal real (`data/events.jsonl`)
+**Arreglo aplicado (2026-09-20, E4.1):** un único helper
+[`_respuesta`](../src/agent/cli.py#L307) unifica los dos modos de *nadie va a responder* —el
+guard `isatty()` y el `EOFError` que ese guard no atrapa— y devuelve `None` en ambos, más en
+los descriptores rotos (`OSError`/`ValueError`: `pythonw`, servicio, subproceso sin stdin).
+Cada llamador conserva el default que ya tenía: el rescate imprime la salida manual,
+`_aprobar_plan` ejecuta (igual que sin TTY) y `_checkpoint_inline` sale sin tocar el plan. El
+early-return por `isatty()` de `_aprobar_plan` se mantiene, así que headless sigue **sin**
+renderizar el roadmap. 11 tests nuevos en `tests/test_cli.py` cubren TTY, sin TTY, `EOFError`,
+stdin cerrado y `sys.stdin is None`.
+
+### 15. Los tests de `run_plan` contaminan el journal real (`data/events.jsonl`) — ✅ cerrada (2026-09-20)
 
 **Impacto: medio · Esfuerzo: bajo** · *Registrada el 2026-08-28: hallazgo de la validación en real
 de E2 (deuda #7).*
+
+> **Cerrada.** Fixture `autouse` en `tests/conftest.py`: ningún test vuelve a escribir en el
+> journal real. Detalle abajo, después del diagnóstico original.
 
 Las llamadas a `run_plan(...)` en `tests/test_runner.py` (unas 20) no redirigen `config.EVENTS`:
 cada corrida de la suite publica eventos de planes falsos al journal **real**. Solo los 6 tests de
@@ -504,10 +590,22 @@ consumidor futuro del bus.
 `tmp_path` para toda la suite (y, opcional, una limpieza única de los eventos falsos ya escritos en
 el journal local).
 
-### 16. `escapement ejecutar` no valida que el repo exista
+**Arreglo aplicado (2026-09-20, E4.1):** `tests/conftest.py` nuevo con un fixture `autouse` que
+apunta `config.EVENTS` a un archivo dentro del `tmp_path` de cada test. Cubre la suite entera
+sin tocar los tests porque todo el código lee el atributo al publicar (`config.EVENTS.open(...)`,
+nunca `from agent.config import EVENTS`); un test que quiera su propio journal puede seguir
+parcheándolo, su `monkeypatch` corre después y gana. **Verificación:** `data/events.jsonl`
+quedó en 664 líneas antes y después de una corrida completa de `pytest` (antes crecía ~592 por
+corrida). Los eventos falsos ya escritos se dejaron como están: `data/` está gitignorado y
+borrarlos es una decisión local, no del repo.
+
+### 16. `escapement ejecutar` no valida que el repo exista — ✅ cerrada (2026-09-20)
 
 **Impacto: bajo · Esfuerzo: bajo** · *Registrada el 2026-08-28: hallazgo de la validación en real
 de E2 (deuda #7).*
+
+> **Cerrada.** `_repo_utilizable()` valida antes de tocar el plan, en las dos vías (argumento y
+> repo recordado). Detalle abajo, después del diagnóstico original.
 
 El plan se resuelve por slug del path, así que un path con typo cuyo slug coincide carga el plan
 igual y la corrida arranca. Los pasos sobreviven porque usan `plan.workdir`, pero el primer código
@@ -517,6 +615,16 @@ git, varios pasos después de arrancar.
 
 **Arreglo propuesto:** validar `Path(repo).is_dir()` al entrar en `_run_ejecutar` y salir con un
 mensaje claro antes de tocar el plan.
+
+**Arreglo aplicado (2026-09-20, E4.1):** [`_repo_utilizable`](../src/agent/cli.py#L354) valida
+`Path(repo).is_dir()` e imprime la ruta ofensora con su origen. Se llama en los **dos** puntos
+donde `_run_ejecutar` fija el repo: justo después de resolver el argumento (antes de
+`plan_slot`, así el typo ni carga el plan ni le pisa `plan.repo` —que la vía vieja persistía—) y
+después de recuperar `plan.repo`, para el caso del repo movido o borrado tras planificar. La
+colisión de slugs quedó fijada en un test: `vault_slug` machaca lo no alfanumérico, así que
+`<tmp>/repo_aprobar` y `<tmp>/repo-aprobar` comparten `plan_<slug>.json`; con la ruta mala,
+`run_plan` ya no se llama y el plan guardado conserva su `repo`. Los dos tests fallan sin el
+parche y pasan con él.
 
 ---
 
