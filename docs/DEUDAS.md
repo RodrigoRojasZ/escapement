@@ -1,6 +1,8 @@
 # Deudas técnicas de Escapement — 2026-07-31
 
-> **Estado: vigente** — única lista viva de deudas del repo. Última revisión: 2026-08-28 (Etapa 2
+> **Estado: vigente** — única lista viva de deudas del repo. Última revisión: 2026-09-20 (Etapa
+> E4.1 del [plan auto-guiado](PLAN_AUTOGUIADO.md): cerradas **#14, #15 y #16** en el commit
+> `b5aed66`. Deudas abiertas: **#11, #12, #13 y #17**. Antes: 2026-08-28 (Etapa 2
 > del [plan auto-guiado](PLAN_AUTOGUIADO.md) **completada**: cerrada #7 — ciclo
 > evaluar→replanificar entregado en PRs #10/#11/#12 y validado en real; alta de #11–#17, hallazgos
 > de esa validación. Antes: E1 cerró #10, #4, #6 y #8; E0 cerró #3, #5 y #9 con alta de #10.
@@ -465,10 +467,14 @@ porque `test_local_models.py` importa `openai` de verdad) y sin `escapement.toml
 passed, 1 skipped. Nada quedó excluido con marcas: la suite ya era 100% headless. Único ajuste de
 deps: `numpy` se añadió también al grupo `dev` (los tests de voz construyen buffers falsos con él).
 
-### 14. El guard no-TTY está roto en Windows: EOFError en los tres prompts interactivos
+### 14. El guard no-TTY está roto en Windows: EOFError en los tres prompts interactivos — ✅ cerrada (2026-09-20)
 
 **Impacto: alto · Esfuerzo: bajo** · *Registrada el 2026-08-28: hallazgo de la validación en real
 de E2 (deuda #7).*
+
+> **Cerrada.** Los tres prompts pasan por `_respuesta()`, que devuelve `None` cuando no hay
+> humano y deja que cada llamador aplique su default seguro. Detalle abajo, después del
+> diagnóstico original.
 
 Los tres prompts del CLI se protegen con `sys.stdin.isatty()` — el rescate de `_reporte_traza`
 ([cli.py:355](../src/agent/cli.py#L355)), `_aprobar_plan`
@@ -488,10 +494,23 @@ stdin (`printf "" | escapement ...`) — un pipe no es char device y el guard s�
 que el no-TTY (el default seguro que ya existe). Es prerequisito práctico de E3: el ciclo
 auto-guiado corre headless.
 
-### 15. Los tests de `run_plan` contaminan el journal real (`data/events.jsonl`)
+**Arreglo aplicado (2026-09-20, E4.1):** un único helper
+[`_respuesta`](../src/agent/cli.py#L307) unifica los dos modos de *nadie va a responder* —el
+guard `isatty()` y el `EOFError` que ese guard no atrapa— y devuelve `None` en ambos, más en
+los descriptores rotos (`OSError`/`ValueError`: `pythonw`, servicio, subproceso sin stdin).
+Cada llamador conserva el default que ya tenía: el rescate imprime la salida manual,
+`_aprobar_plan` ejecuta (igual que sin TTY) y `_checkpoint_inline` sale sin tocar el plan. El
+early-return por `isatty()` de `_aprobar_plan` se mantiene, así que headless sigue **sin**
+renderizar el roadmap. 11 tests nuevos en `tests/test_cli.py` cubren TTY, sin TTY, `EOFError`,
+stdin cerrado y `sys.stdin is None`.
+
+### 15. Los tests de `run_plan` contaminan el journal real (`data/events.jsonl`) — ✅ cerrada (2026-09-20)
 
 **Impacto: medio · Esfuerzo: bajo** · *Registrada el 2026-08-28: hallazgo de la validación en real
 de E2 (deuda #7).*
+
+> **Cerrada.** Fixture `autouse` en `tests/conftest.py`: ningún test vuelve a escribir en el
+> journal real. Detalle abajo, después del diagnóstico original.
 
 Las llamadas a `run_plan(...)` en `tests/test_runner.py` (unas 20) no redirigen `config.EVENTS`:
 cada corrida de la suite publica eventos de planes falsos al journal **real**. Solo los 6 tests de
@@ -504,10 +523,22 @@ consumidor futuro del bus.
 `tmp_path` para toda la suite (y, opcional, una limpieza única de los eventos falsos ya escritos en
 el journal local).
 
-### 16. `escapement ejecutar` no valida que el repo exista
+**Arreglo aplicado (2026-09-20, E4.1):** `tests/conftest.py` nuevo con un fixture `autouse` que
+apunta `config.EVENTS` a un archivo dentro del `tmp_path` de cada test. Cubre la suite entera
+sin tocar los tests porque todo el código lee el atributo al publicar (`config.EVENTS.open(...)`,
+nunca `from agent.config import EVENTS`); un test que quiera su propio journal puede seguir
+parcheándolo, su `monkeypatch` corre después y gana. **Verificación:** `data/events.jsonl`
+quedó en 664 líneas antes y después de una corrida completa de `pytest` (antes crecía ~592 por
+corrida). Los eventos falsos ya escritos se dejaron como están: `data/` está gitignorado y
+borrarlos es una decisión local, no del repo.
+
+### 16. `escapement ejecutar` no valida que el repo exista — ✅ cerrada (2026-09-20)
 
 **Impacto: bajo · Esfuerzo: bajo** · *Registrada el 2026-08-28: hallazgo de la validación en real
 de E2 (deuda #7).*
+
+> **Cerrada.** `_repo_utilizable()` valida antes de tocar el plan, en las dos vías (argumento y
+> repo recordado). Detalle abajo, después del diagnóstico original.
 
 El plan se resuelve por slug del path, así que un path con typo cuyo slug coincide carga el plan
 igual y la corrida arranca. Los pasos sobreviven porque usan `plan.workdir`, pero el primer código
@@ -517,6 +548,16 @@ git, varios pasos después de arrancar.
 
 **Arreglo propuesto:** validar `Path(repo).is_dir()` al entrar en `_run_ejecutar` y salir con un
 mensaje claro antes de tocar el plan.
+
+**Arreglo aplicado (2026-09-20, E4.1):** [`_repo_utilizable`](../src/agent/cli.py#L354) valida
+`Path(repo).is_dir()` e imprime la ruta ofensora con su origen. Se llama en los **dos** puntos
+donde `_run_ejecutar` fija el repo: justo después de resolver el argumento (antes de
+`plan_slot`, así el typo ni carga el plan ni le pisa `plan.repo` —que la vía vieja persistía—) y
+después de recuperar `plan.repo`, para el caso del repo movido o borrado tras planificar. La
+colisión de slugs quedó fijada en un test: `vault_slug` machaca lo no alfanumérico, así que
+`<tmp>/repo_aprobar` y `<tmp>/repo-aprobar` comparten `plan_<slug>.json`; con la ruta mala,
+`run_plan` ya no se llama y el plan guardado conserva su `repo`. Los dos tests fallan sin el
+parche y pasan con él.
 
 ---
 
