@@ -19,6 +19,7 @@ al mergear tú la rama. Si el repo del plan no es git, se cae al comportamiento 
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -28,6 +29,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 from agent import bus, config, costs, executors, fsutil, local_models, personas, planner
 from agent.planner import Plan, Step
@@ -136,6 +138,50 @@ def _git_run(repo: str, *args: str) -> str | None:
     return r.stdout if r.returncode == 0 else None
 
 
+_HUELLA_UNTRACKED_BYTES = 8 * 1024 * 1024  # techo de lectura por huella (deuda #17)
+
+
+def _huella_untracked(repo: str) -> str:
+    """Marca del CONTENIDO de cada archivo untracked, una línea por archivo. "" si no hay ninguno.
+
+    Deuda #17. Tercer componente de la huella de :func:`_git_status`: ni el porcelain ni
+    ``git diff HEAD`` ven el contenido de un archivo sin trackear —el porcelain imprime ``?? a.md``
+    igual antes y después de reescribirlo, y el diff solo mira lo que el índice conoce—, así que
+    reescribir un archivo que un paso anterior dejó untracked daba huella idéntica y el guard lo
+    marcaba "sin efecto en disco". Pasó en la validación de E2 (escenario 2, paso 9).
+
+    Lista con ``ls-files --others --exclude-standard -z``: el mismo criterio de ignorados que el
+    porcelain, y ``-z`` evita el quoting de ``core.quotepath`` (las rutas con acentos llegan crudas).
+
+    Args:
+        repo: carpeta del repo git, la misma que recibe :func:`_git_status`.
+
+    Returns:
+        Una línea ``"<marca> <ruta>"`` por archivo, ordenadas por ruta para que la huella sea
+        estable. La marca es el sha256 del contenido; ``size:<n>`` si el archivo ya no cabe en el
+        presupuesto de lectura (``_HUELLA_UNTRACKED_BYTES``, para que un ``node_modules/`` sin
+        trackear no vuelva lenta cada comprobación) e ``ilegible`` si desapareció entre el listado
+        y la lectura. "" si git falla o no hay untracked: la huella queda como estaba.
+    """
+    listado = _git_run(repo, "ls-files", "--others", "--exclude-standard", "-z")
+    if not listado:
+        return ""
+    lineas, presupuesto = [], _HUELLA_UNTRACKED_BYTES
+    for rel in sorted(x for x in listado.split("\0") if x):
+        ruta = Path(repo) / rel
+        try:
+            tam = ruta.stat().st_size
+            if tam > presupuesto:
+                marca = f"size:{tam}"  # sin presupuesto: al menos capta el cambio de tamaño
+            else:
+                presupuesto -= tam
+                marca = hashlib.sha256(ruta.read_bytes()).hexdigest()
+        except OSError:
+            marca = "ilegible"  # borrado tras el listado, enlace roto, permiso denegado
+        lineas.append(f"{marca} {rel}")
+    return "\n".join(lineas)
+
+
 def _git_status(repo: str) -> str | None:
     """Huella del árbol de trabajo SENSIBLE AL CONTENIDO. None si no es repo git o git falla.
 
@@ -147,6 +193,11 @@ def _git_status(repo: str) -> str | None:
     el CONTENIDO de lo modificado). Solo el porcelain sería ciego al contenido: reeditar un archivo que
     ya estaba modificado deja la lista idéntica y daría un falso 'sin efecto'. El diff cambia con cada
     edición real. ``git diff HEAD`` puede no existir (repo sin commits): en ese caso basta el porcelain.
+
+    Un TERCER componente, tras el segundo ``\\0``, cubre el hueco que quedaba: el contenido de los
+    archivos untracked, que no entran en el diff y cuyo porcelain es idéntico antes y después de
+    reescribirlos (deuda #17, ver :func:`_huella_untracked`). Va al final a propósito:
+    :func:`_archivos_tocados` lee solo hasta el PRIMER ``\\0``, así que no le afecta.
     """
     porcelain = _git_run(repo, "status", "--porcelain")
     if porcelain is None:
@@ -154,7 +205,7 @@ def _git_status(repo: str) -> str | None:
     diff = (
         _git_run(repo, "diff", "HEAD") or ""
     )  # "" si no hay HEAD (repo sin commits): usa solo porcelain
-    return porcelain + "\0" + diff
+    return porcelain + "\0" + diff + "\0" + _huella_untracked(repo)
 
 
 def _tokens(texto: str) -> set[str]:

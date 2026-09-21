@@ -545,6 +545,62 @@ def test_git_status_sensible_al_contenido_en_archivo_ya_sucio(tmp_path):
 
 def test_git_status_none_fuera_de_repo(tmp_path):
     assert runner._git_status(str(tmp_path)) is None  # sin git init -> None (no bloquea)
+# F1 / deuda #17: la huella también debe ver el CONTENIDO de los archivos UNTRACKED. Reescribir uno
+# deja el porcelain idéntico ('?? a.md' == '?? a.md') y no entra en `git diff HEAD` -> falso
+# 'sin efecto en disco' (pasó en la validación de E2: paso 9 reescribiendo APROBACION.md).
+
+
+def _repo_con_commit(tmp_path):
+    """Repo git con un archivo ya commiteado, para que `git diff HEAD` exista."""
+    (tmp_path / "base.py").write_text("x = 1\n", encoding="utf-8")
+    _git(tmp_path, "init")
+    _git(tmp_path, "add", "base.py")
+    _git(tmp_path, "commit", "-m", "init")
+    return tmp_path
+
+
+def test_git_status_sensible_al_contenido_de_untracked(tmp_path):
+    repo = _repo_con_commit(tmp_path)
+    (repo / "APROBACION.md").write_text("secciones heredadas\n", encoding="utf-8")
+    h1 = runner._git_status(str(repo))
+    (repo / "APROBACION.md").write_text("plantilla estricta\n", encoding="utf-8")  # mismo nombre
+    h2 = runner._git_status(str(repo))
+    assert h1 is not None and h2 is not None
+    assert h1.split("\0")[:2] == h2.split("\0")[:2]  # porcelain + diff idénticos: esa es la trampa
+    assert h1 != h2  # el tercer componente (sha256 del untracked) sí se mueve
+
+
+def test_archivos_tocados_no_ve_el_tercer_componente(tmp_path):
+    # el hash va DESPUÉS del segundo \0 justamente para que la extracción de rutas no cambie.
+    repo = _repo_con_commit(tmp_path)
+    (repo / "nuevo.md").write_text("hola\n", encoding="utf-8")
+    (repo / "base.py").write_text("x = 2\n", encoding="utf-8")
+    assert sorted(runner._archivos_tocados(runner._git_status(str(repo)))) == ["base.py", "nuevo.md"]
+
+
+def test_huella_untracked_vacia_sin_untracked_y_respeta_gitignore(tmp_path):
+    repo = _repo_con_commit(tmp_path)
+    assert runner._huella_untracked(str(repo)) == ""  # árbol limpio: nada que hashear
+    (repo / ".gitignore").write_text("secreto.txt\n", encoding="utf-8")
+    (repo / "secreto.txt").write_text("no me mires\n", encoding="utf-8")
+    huella = runner._huella_untracked(str(repo))
+    assert "secreto.txt" not in huella  # --exclude-standard: mismo criterio que el porcelain
+    assert huella.endswith(" .gitignore")  # el .gitignore sí: untracked y no ignorado
+
+
+def test_huella_untracked_cae_a_tamano_cuando_se_acaba_el_presupuesto(tmp_path, monkeypatch):
+    repo = _repo_con_commit(tmp_path)
+    (repo / "grande.bin").write_bytes(b"ab" * 100)
+    monkeypatch.setattr(runner, "_HUELLA_UNTRACKED_BYTES", 10)  # un untracked enorme no se lee
+    assert runner._huella_untracked(str(repo)) == "size:200 grande.bin"
+
+
+def test_huella_untracked_con_ruta_acentuada(tmp_path):
+    repo = _repo_con_commit(tmp_path)
+    (repo / "informe_año.md").write_text("hola\n", encoding="utf-8")
+    huella = runner._huella_untracked(str(repo))
+    assert huella.endswith(" informe_año.md")  # -z: sin las comillas de core.quotepath
+    assert "ilegible" not in huella  # la ruta llegó entera, el archivo se pudo leer
 
 
 # F1: edición sin efecto en disco (git status idéntico antes/después) -> falso 'hecho'.
