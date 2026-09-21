@@ -23,8 +23,7 @@
 Asistente personal residente (voz con hotkey <kbd>F2</kbd> + REPL de texto) sobre el Claude Agent
 SDK, con un **orquestador de ingeniería** encima: recibe una directiva ("optimiza este archivo"),
 escanea deuda, despacha el refactor a un motor pluggable (Claude Code / Antigravity / Cursor) en un
-worktree aislado, verifica (tests + diff de API pública + juez adversarial), mide la mejora y abre
-un PR.
+worktree aislado, verifica (tests + diff de API pública + juez adversarial), mide la mejora y sube los cambios de lo modificado.
 
 Hoy ejecuta tareas bien definidas de punta a punta. El rumbo —de "ejecutar tareas" a "gestionar
 objetivos hasta *done*"— y el estado de cada pieza viven en **[`docs/VISION.md`](docs/VISION.md)**,
