@@ -23,7 +23,8 @@
 Asistente personal residente (voz con hotkey <kbd>F2</kbd> + REPL de texto) sobre el Claude Agent
 SDK, con un **orquestador de ingeniería** encima: recibe una directiva ("optimiza este archivo"),
 escanea deuda, despacha el refactor a un motor pluggable (Claude Code / Antigravity / Cursor) en un
-worktree aislado, verifica (tests + diff de API pública + juez adversarial), mide la mejora y sube los cambios de lo modificado.
+worktree aislado, verifica (tests + diff de API pública + juez adversarial), mide la mejora y sube
+los cambios de lo modificado.
 
 Hoy ejecuta tareas bien definidas de punta a punta. El rumbo —de "ejecutar tareas" a "gestionar
 objetivos hasta *done*"— y el estado de cada pieza viven en **[`docs/VISION.md`](docs/VISION.md)**,
@@ -433,6 +434,33 @@ Distinta del gate (que vigila *tools*), corre **dentro del orquestador**, justo 
 `password = "..."`). Si encuentra alguno **aborta el despacho sin PR**. No marca referencias a
 env vars (`os.getenv("X_PASSWORD")`) ni placeholders obvios. El evento queda en el ledger (`blocked_secrets`).
 
+### Guard de publicación (este repo es público)
+
+Una tercera capa, fuera del proceso del agente:
+[`scripts/check_publicacion.py`](scripts/check_publicacion.py) revisa lo que está por entrar al
+repo —el índice, el rango de un push o el árbol completo— y aborta si encuentra secretos
+literales, correos personales, rutas absolutas de la máquina de desarrollo, archivos que nunca
+deben versionarse (`.env*`, `escapement.toml`, `*.pem`, `data/`) o términos privados vetados.
+
+Corre en tres puntos, porque ninguno solo alcanza: los hooks locales
+([`.githooks/`](.githooks)) se saltan con `--no-verify` y no existen al editar desde la web de
+GitHub, así que el mismo script vuelve a correr en CI sobre el árbol completo.
+
+```bash
+git config core.hooksPath .githooks      # activar los hooks tras clonar
+python scripts/check_publicacion.py --arbol
+```
+
+**El guard no contiene lo que protege.** Los términos concretos (nombres de repos privados,
+clientes, servidores) viven en `.publicacion-veto.txt`, que está gitignorado a propósito:
+publicarlo publicaría justo lo que oculta. Acá se versiona el mecanismo y los patrones genéricos;
+la lista es local. Ver [`.publicacion-veto.example.txt`](.publicacion-veto.example.txt).
+
+Un archivo donde un patrón genérico es legítimo (los fixtures de los tests, el detector de
+secretos, este mismo guard) se exime en `_ALLOWLIST`, con el motivo a la vista. La allowlist
+perdona los patrones genéricos, **nunca el veto**: un término privado bloquea en cualquier
+archivo, incluido el guard.
+
 ---
 
 ## Memoria
@@ -807,7 +835,9 @@ Lo que no declares queda en su default y el orden del registro se preserva (`sel
 ```text
 docs/
 └── VISION.md            # propósito + roadmap post-MVP (documento vivo)
+.githooks/               # pre-commit y pre-push: corren el guard de publicación
 scripts/
+├── check_publicacion.py  # guard de publicación: nada confidencial entra a este repo público
 ├── escapement-voz.vbs    # launcher sin consola: pythonw -m agent.cli --voz (residente)
 ├── install-startup.vbs   # acceso directo en la carpeta de Inicio de Windows (autoarranque)
 └── uninstall-startup.vbs # quita el autoarranque
@@ -817,7 +847,7 @@ src/agent/
 ├── repl.py              # REPL de texto (loop conversacional)
 ├── session.py           # build_options: wiring del gate en capas
 ├── config.py            # rutas, modelos, executor, Anillo 0 (RING0_TOOLS), config de voz
-├── orchestrator.py      # rama aislada + executor headless + verify + PR (nunca mergea)
+├── orchestrator.py      # rama aislada + executor headless + verify + PR
 ├── executors.py         # motor pluggable: claude | antigravity | cursor (dispatch + juez)
 ├── backlog.py           # escáner de deuda técnica (AST+regex, sin LLM) -> candidatos priorizados
 ├── verify.py            # baseline + diff de API pública -> veredicto

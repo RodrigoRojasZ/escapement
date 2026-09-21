@@ -1,0 +1,13 @@
+# Plantilla de .publicacion-veto.txt — cópiala sin el sufijo .example y llénala en local.
+#
+# El archivo real está gitignorado A PROPÓSITO: contiene los términos que no deben salir de
+# tu máquina (nombres de repos privados, clientes, proyectos internos, apodos de servidores).
+# Publicarlo publicaría justo lo que oculta. Lo que se versiona es el mecanismo, no la lista.
+#
+# Un término por línea, se busca como substring sin distinguir mayúsculas. `#` comenta.
+# Si un término aparece en un archivo que va al commit, el guard aborta el commit o el push.
+#
+# Ejemplos del formato (reemplázalos por los tuyos):
+# mi-repo-privado
+# nombre-del-cliente
+# servidor-interno

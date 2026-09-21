@@ -12,6 +12,9 @@ build/
 !.env.example
 escapement.toml
 
+# Lista de términos vetados del guard de publicación: no se publica (ver el .example)
+.publicacion-veto.txt
+
 # Test / cache
 .pytest_cache/
 .ruff_cache/

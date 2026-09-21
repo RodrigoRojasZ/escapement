@@ -15,10 +15,24 @@ name: tests
 on:
   pull_request:
   push:
-    branches: [master]
+    branches: [main, master]
   workflow_dispatch:
 
 jobs:
+  publicacion:
+    # Este repo es público: el guard vuelve a correr en CI porque un hook local se salta con
+    # --no-verify y no existe al editar desde la web de GitHub. Acá solo corren los patrones
+    # genéricos: la lista de términos vetados es local y no se publica.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Guard de publicación (sin datos confidenciales)
+        run: python scripts/check_publicacion.py --arbol
+
   pytest:
     runs-on: windows-latest
     timeout-minutes: 15

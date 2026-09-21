@@ -1,0 +1,4 @@
+#!/bin/sh
+# Guard de publicación: este repo es público, nada confidencial entra al índice.
+# Se activa con:  git config core.hooksPath .githooks
+exec python scripts/check_publicacion.py --staged

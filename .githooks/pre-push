@@ -1,0 +1,11 @@
+#!/bin/sh
+# Guard de publicación: último corte antes de que los commits salgan a GitHub.
+# git entrega por stdin una línea por ref:  <ref local> <sha local> <ref remoto> <sha remoto>
+# Se activa con:  git config core.hooksPath .githooks
+estado=0
+nulo=0000000000000000000000000000000000000000
+while read -r _ref_local sha_local _ref_remoto sha_remoto; do
+    [ "$sha_local" = "$nulo" ] && continue   # borrado de rama: no hay contenido que revisar
+    python scripts/check_publicacion.py --rango "$sha_remoto" "$sha_local" || estado=1
+done
+exit $estado
