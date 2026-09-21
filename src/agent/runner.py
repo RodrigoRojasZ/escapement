@@ -544,6 +544,35 @@ class Traspaso:
     motivo: str = ""  # por qué falló ('' si ok)
 
 
+def _fijar_avance(wt: str, plan: Plan) -> tuple[bool, str]:
+    """Commitea en la rama del plan lo que el worktree tenga sin commitear. ``(ok, motivo)``.
+
+    Los pasos ``editar`` dejan su cambio SIN commitear en el worktree; esta función lo fija en la
+    rama para que otra herramienta pueda partir de un árbol limpio: la entrega
+    (:func:`traspasar_a_rama`, que necesita el delta completo en la rama) y el carril ``target`` de
+    :func:`_h_editar` (que despacha a ``optimize`` y lo trae de vuelta con un ff-merge — deuda #11).
+    No tocar el repo real: ``wt`` es siempre el worktree del plan.
+
+    Args:
+        wt: ruta del worktree del plan.
+        plan: el plan en curso; su ``objetivo`` da el mensaje del commit WIP.
+
+    Returns:
+        ``(True, "")`` si no había nada que commitear o si el commit salió; ``(False, motivo)`` si
+        ``wt`` no es un repo git o el commit falló por algo que no sea "nothing to commit".
+    """
+    status = _git_run(wt, "status", "--porcelain")
+    if status is None:
+        return False, "el worktree del plan no es un repo git"
+    if not status.strip():
+        return True, ""
+    _git_try(wt, "add", "-A", "--", ".", ":(exclude)**/__pycache__/**", ":(exclude)*.py[co]")
+    ok, out = _git_try(wt, "commit", "-m", f"escapement(wip): {plan.objetivo[:60]}")
+    if not ok and "nothing to commit" not in out:
+        return False, f"no pude commitear el avance del worktree: {out[:200]}"
+    return True, ""
+
+
 def _git_try(cwd: str, *args: str, stdin: str | None = None) -> tuple[bool, str]:
     """Corre ``git <args>`` en ``cwd`` y devuelve ``(ok, stdout+stderr)``. Nunca lanza.
 
@@ -600,14 +629,9 @@ def traspasar_a_rama(plan: Plan, repo: str, *, base: str = "", dest: str = "") -
     wt = plan.workdir
     if not wt or not os.path.isdir(wt) or not plan.rama:
         return Traspaso(False, motivo="el plan no tiene un worktree git activo")
-    status = _git_run(wt, "status", "--porcelain")
-    if status is None:
-        return Traspaso(False, motivo="el worktree del plan no es un repo git")
-    if status.strip():  # asegura que nada quede sin commitear en la rama del plan
-        _git_try(wt, "add", "-A", "--", ".", ":(exclude)**/__pycache__/**", ":(exclude)*.py[co]")
-        ok, out = _git_try(wt, "commit", "-m", f"escapement(wip): {plan.objetivo[:60]}")
-        if not ok and "nothing to commit" not in out:
-            return Traspaso(False, motivo=f"no pude commitear el avance del worktree: {out[:200]}")
+    ok, motivo = _fijar_avance(wt, plan)  # nada queda sin commitear en la rama del plan
+    if not ok:
+        return Traspaso(False, motivo=motivo)
     base = base or default_branch(repo)
     if not base:
         return Traspaso(False, motivo="no pude determinar la rama por defecto del repo")
@@ -828,15 +852,58 @@ def _h_investigar(step: Step, plan: Plan, repo: str) -> tuple[str, str]:
     )
 
 
-def _h_editar(step: Step, plan: Plan, repo: str) -> tuple[str, str]:
-    target = _target(step)
-    if target:
-        from agent.orchestrator import optimize
+def _editar_target(step: Step, plan: Plan, repo: str, target: str) -> tuple[str, str]:
+    """Carril ``target`` de :func:`_h_editar`: ``optimize`` sobre el WORKTREE del plan (deuda #11).
 
-        res = optimize(repo, step.accion + _context(step, plan), target)
+    ``optimize`` monta su propio worktree efímero y deja el refactor en una rama
+    ``escapement/optimiza-…``, verificado y juzgado. Eso es justo lo que queremos de un archivo
+    concreto —pero antes se lo pedíamos sobre el **repo real**: la rama nacía de la rama del repo
+    (no del plan), así que el paso no veía lo que habían editado los pasos previos y los siguientes
+    no veían lo que editó él. En la validación de E2 un ``[verificar]`` falló honestamente contra el
+    worktree y frenó la corrida; hubo que traer el archivo a mano.
+
+    Ahora el carril encadena en la rama del plan: (1) ``_fijar_avance`` commitea lo que los pasos
+    anteriores dejaron sin commitear —si no, ``optimize`` partiría del último commit y editaría una
+    versión vieja del target—; (2) ``optimize`` corre con el worktree como repo, así que su base es
+    la rama del plan; (3) un ``merge --ff-only`` trae el commit resultante al worktree, y los pasos
+    siguientes lo ven. El ff es siempre posible: la rama salió del HEAD que acabamos de fijar y
+    trae un commit encima.
+
+    ``make_pr=False`` a propósito: la base sería la rama del plan, que no está en el remoto, y la
+    entrega del plan es :func:`traspasar_a_rama`, no un PR por paso. La rama de ``optimize`` no se
+    borra: si el ff-merge falla, es donde sigue vivo el trabajo, y la nota la menciona.
+
+    Sin worktree del plan (repo no-git, o el montaje de S2 falló) se mantiene el comportamiento
+    anterior —``optimize`` sobre ``repo``, con PR—: ahí no hay continuidad que preservar.
+    """
+    from agent.orchestrator import optimize
+
+    directiva = step.accion + _context(step, plan)
+    work = _workdir(plan, repo)
+    if work == repo:  # sin worktree del plan: carril de siempre (con PR)
+        res = optimize(repo, directiva, target)
         return (
             (HECHO, f"PR: {res.pr_url or res.verdict}") if res.verified else (FALLIDO, res.verdict)
         )
+    ok, motivo = _fijar_avance(work, plan)
+    if not ok:
+        return FALLIDO, f"no pude fijar el avance del plan antes de optimizar {target}: {motivo}"
+    res = optimize(work, directiva, target, make_pr=False)
+    if not res.verified:
+        return FALLIDO, res.verdict
+    traido, out = _git_try(work, "merge", "--ff-only", res.branch)
+    if not traido:
+        return FALLIDO, (
+            f"{target} se optimizó y verificó, pero el cambio NO entró al worktree del plan "
+            f"(el trabajo está intacto en la rama {res.branch}): {out[:200]}"
+        )[:_NOTE_LIMIT]
+    return HECHO, f"aplicado en el worktree del plan: {res.verdict} (rama {res.branch})"[:_NOTE_LIMIT]
+
+
+def _h_editar(step: Step, plan: Plan, repo: str) -> tuple[str, str]:
+    target = _target(step)
+    if target:
+        return _editar_target(step, plan, repo, target)
     # Sin archivo concreto: en modo autónomo el especialista desglosa y edita los que apliquen.
     # Este carril no pasa por el verify de optimize, así que comprobamos el EFECTO EN DISCO
     # nosotros: una edición que no cambia el árbol de trabajo es un falso 'hecho', diga lo que
