@@ -49,7 +49,7 @@ def _category(tool_name: str) -> str:
 
     Compartida por el gate de texto y el de voz para que una sola aprobacion cubra el tipo.
     """
-    if tool_name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+    if tool_name in ("Write", "Edit", "NotebookEdit"):
         return "edit"
     if tool_name in ("Bash", "PowerShell"):
         return "shell"

@@ -404,6 +404,21 @@ def test_verificar_despacha_sin_poder_escribir(monkeypatch, tmp_path):
     assert capturado["mode"] == "edit"  # pero con shell: una verificación real corre pytest
 
 
+def test_verificar_ignora_warning_del_cli_tras_el_veredicto(monkeypatch, tmp_path):
+    # Falso negativo real: el CLI a veces imprime un warning de una línea DESPUÉS del veredicto
+    # (p.ej. "Permission deny rule ... matches no known tool" por un nombre de tool obsoleto en
+    # --disallowedTools). La última línea cruda deja de ser el veredicto, pero VERIFICADO sigue
+    # estando entre las últimas líneas -> el paso debe quedar HECHO, no FALLIDO.
+    out = (
+        "Corrí la verificación y todo pasó.\n"
+        "VERIFICADO\n"
+        'Permission deny rule "MultiEdit" matches no known tool — check for typos.'
+    )
+    monkeypatch.setattr(runner.executors, "run_agent", lambda *a, **k: (True, out))
+    p = _plan_verificar(_repo_con_commit(tmp_path))
+    assert runner._h_verificar(p.pasos[0], p, str(tmp_path)) == (HECHO, "verificado")
+
+
 def test_verificar_descarta_el_veredicto_si_toco_el_arbol(monkeypatch, tmp_path):
     # Pasó en la validación de E2: el verificador escribió él mismo lo que debía revisar.
     repo = _repo_con_commit(tmp_path)
@@ -1151,6 +1166,79 @@ def test_editar_sin_target_despacha_no_shell(monkeypatch):
     p = Plan("o", "g", [Step(1, "actualiza los docstrings del paquete", "editar", "d", [])])
     run_plan(p, "repo", persist=False)
     assert kwargs[0].get("no_shell") is True
+
+
+def test_confesion_shell_denegado_detecta_frases():
+    for txt in (
+        "Bash is disabled for this session, in subagents as well as here.",
+        "No puedo ejecutar pytest sin acceso a la terminal.",
+        "I can't run tests without Bash access.",
+        "No tengo acceso a shell en este dispatch.",
+    ):
+        assert runner._confesion_shell_denegado(txt), txt
+
+
+def test_confesion_shell_denegado_no_falso_positivo():
+    for txt in ("Edité el archivo y corrí los tests.", "Listo, todo aplicado.", ""):
+        assert not runner._confesion_shell_denegado(txt), txt
+
+
+def test_editar_sin_target_con_done_que_exige_pytest_explica_la_causa_real(monkeypatch):
+    # Regresión del gap de diseño: un paso 'editar' SIN archivo .py en la acción (el planner no
+    # mencionó ninguno) cuyo 'done' exige confirmar con pytest ("el test falla antes del fix y pasa
+    # después") no puede cumplirse en el carril sin target: ese carril despacha con no_shell=True
+    # (S3) a propósito. Antes de este fix la nota solo decía "sin efecto en disco" sin explicar POR
+    # QUÉ, y quien retomaba el plan tenía que leer runner.py/executors.py para diagnosticarlo.
+    monkeypatch.setattr(runner, "_git_status", lambda repo: "")  # sin efecto en disco (no hay shell)
+    monkeypatch.setattr(
+        runner.executors,
+        "run_agent",
+        lambda *a, **k: (
+            True,
+            "Escribí el test de regresión, pero Bash is disabled for this session, "
+            "in subagents as well as here, así que no puedo correr pytest para confirmar "
+            "que falla antes del fix y pasa después.",
+        ),
+    )
+    p = Plan(
+        "o",
+        "g",
+        [
+            Step(
+                1,
+                "corrige los hallazgos de la auditoría en los módulos afectados",
+                "editar",
+                "cada hallazgo tiene un test de regresión que falla antes del fix y pasa después",
+                [],
+            )
+        ],
+    )
+    run_plan(p, "repo", persist=False)
+    nota = p.pasos[0].nota
+    assert p.pasos[0].estado == "fallido"
+    assert "no_shell" in nota and "Bash is disabled" in nota  # causa real, no el síntoma genérico
+    assert "verificar" in nota  # apunta a la salida ya soportada por el diseño
+
+
+def test_editar_shell_denegado_no_pisa_una_edicion_que_si_tocó_disco(monkeypatch):
+    # La confesión de shell denegado solo se mira si NO hubo efecto en disco. Si el executor SÍ
+    # editó archivos (no_shell bloquea Bash/PowerShell, no las tools de edición) y de paso comenta
+    # que no pudo correr pytest para verificar, la edición sigue siendo HECHO: no hay que pisar un
+    # cambio real por una frase sobre pytest que no vino acompañada de "sin efecto en disco".
+    huellas = iter(["", " M archivo.py"])  # antes vacío, después con cambio real
+    monkeypatch.setattr(runner, "_git_status", lambda repo: next(huellas))
+    monkeypatch.setattr(
+        runner.executors,
+        "run_agent",
+        lambda *a, **k: (
+            True,
+            "Edité archivo.py con el fix. No pude correr pytest para confirmarlo "
+            "porque Bash is disabled for this session, pero el cambio quedó aplicado.",
+        ),
+    )
+    p = Plan("o", "g", [Step(1, "agrega hints a todo", "editar", "d", [])])
+    run_plan(p, "repo", persist=False)
+    assert p.pasos[0].estado == HECHO  # el diff real manda, no el comentario sobre pytest
 
 
 def test_ejecutar_conserva_shell(monkeypatch):

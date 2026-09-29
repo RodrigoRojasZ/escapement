@@ -290,7 +290,7 @@ def test_guard_cli_deny_shell_no_afecta_otras_tools():
 # --- Deuda #12: con AGENT_DENY_WRITE=1 (paso de verificación) el hook deniega TODA escritura ---
 
 
-@pytest.mark.parametrize("tool", ["Write", "Edit", "MultiEdit", "NotebookEdit"])
+@pytest.mark.parametrize("tool", ["Write", "Edit", "NotebookEdit"])
 def test_guard_cli_deny_write_bloquea_las_tools_de_edicion(tool):
     evento = json.dumps({"tool_name": tool, "tool_input": {"file_path": "src/main.py"}})
     r = _run_hook_env(evento, {"AGENT_DENY_WRITE": "1"})

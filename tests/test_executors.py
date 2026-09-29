@@ -245,14 +245,14 @@ def test_run_agent_sin_no_shell_no_toca_el_env(monkeypatch, tmp_path):
 def test_claude_edit_no_write_agrega_disallowed_tools():
     cmd, _ = EXECUTORS["claude"].build_edit("claude", "x", no_write=True)
     i = cmd.index("--disallowedTools")
-    assert cmd[i + 1 : i + 5] == ["Write", "Edit", "MultiEdit", "NotebookEdit"]
+    assert cmd[i + 1 : i + 4] == ["Write", "Edit", "NotebookEdit"]
     assert "Bash" not in cmd[i + 1 :]  # verificar necesita shell: no se le quita
 
 
 def test_claude_edit_no_shell_y_no_write_se_acumulan():
     cmd, _ = EXECUTORS["claude"].build_edit("claude", "x", no_shell=True, no_write=True)
     i = cmd.index("--disallowedTools")
-    assert cmd[i + 1 :] == ["Bash", "PowerShell", "Write", "Edit", "MultiEdit", "NotebookEdit"]
+    assert cmd[i + 1 :] == ["Bash", "PowerShell", "Write", "Edit", "NotebookEdit"]
 
 
 def test_builders_sin_deny_ignoran_no_write():

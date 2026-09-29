@@ -121,6 +121,29 @@ def _sin_cambio_necesario(out: str) -> bool:
     return bool(_YA_CUMPLE.search(out or ""))
 
 
+# El carril editar-sin-target despacha con no_shell=True (S3): el executor puede notar que le falta
+# Bash/PowerShell (para pytest u otro comando que el 'done' del paso exige) y decirlo en prosa. Sin
+# esto la nota de fallo decía solo "sin efecto en disco" —síntoma, no causa— y quien retomaba el plan
+# tenía que leer runner.py/executors.py para entender que el paso nunca tuvo shell.
+_SHELL_DENEGADO = re.compile(
+    r"bash\s+(?:tool\s+)?is\s+disabled|bash\s+is\s+disabled\s+for\s+this\s+session"
+    r"|shell\s+(?:commands?\s+)?(?:is|are)\s+disabled|powershell\s+(?:is\s+)?disabled"
+    r"|disallowed\s?tool|(?:bash|shell)\s+(?:tool\s+)?(?:was\s+|is\s+)?(?:not\s+available|unavailable)"
+    r"|(?:i\s+)?(?:can'?t|cannot|don'?t\s+have\s+access\s+to)\s+(?:run|use)\s+"
+    r"(?:bash|shell|powershell|commands?|pytest|tests?)"
+    r"|no\s+(?:tengo|tenemos)\s+acceso\s+a\s+(?:bash|shell|la\s+terminal|powershell)"
+    r"|no\s+puedo\s+(?:correr|ejecutar)\s+(?:comandos?|pytest|tests?|la\s+suite)"
+    r"|sin\s+acceso\s+a\s+(?:bash|shell|la\s+terminal|powershell)",
+    re.IGNORECASE,
+)
+
+
+def _confesion_shell_denegado(out: str) -> str | None:
+    """Fragmento donde el executor confiesa que necesitaba shell (pytest/comandos) y no lo tenía."""
+    m = _SHELL_DENEGADO.search(out or "")
+    return m.group(0).strip() if m else None
+
+
 def _git_run(repo: str, *args: str) -> str | None:
     """Corre ``git <args>`` en ``repo`` y devuelve stdout, o None si git falla/ausente."""
     try:
@@ -797,6 +820,17 @@ def _h_ejecutar(step: Step, plan: Plan, repo: str) -> tuple[str, str]:
     return HECHO, texto[:_NOTE_LIMIT]
 
 
+# Cuántas líneas finales del output de 'verificar' se inspeccionan buscando el veredicto: cubre un
+# warning benigno de una línea del CLI impreso después del veredicto real, sin admitir texto
+# arbitrario del análisis como si fuera el cierre.
+_VEREDICTO_VENTANA = 5
+
+
+def _es_linea_veredicto(linea: str) -> bool:
+    l = linea.upper()
+    return l.startswith("VERIFICADO") or l.startswith("FALLO")
+
+
 def _h_verificar(step: Step, plan: Plan, repo: str) -> tuple[str, str]:
     """Verifica el ``done`` del paso SIN poder editar lo que audita (deuda #12).
 
@@ -831,11 +865,16 @@ def _h_verificar(step: Step, plan: Plan, repo: str) -> tuple[str, str]:
             f"(archivos sucios ahora: {tocados}). Revisa el cambio antes de dar el paso por hecho."
             f"\n{(out or '').strip()}"
         )[:_NOTE_LIMIT]
-    # Miramos SOLO la última línea (el veredicto): así menciones de "fallo(s)" en el análisis no
-    # tumban un verificar que en realidad pasó.
+    # Buscamos el veredicto entre las ÚLTIMAS líneas, no asumimos que es literalmente la última:
+    # así menciones de "fallo(s)" en el análisis no tumban un verificar que en realidad pasó, Y un
+    # warning benigno que el CLI imprima DESPUÉS del veredicto (p.ej. un flag de tool deprecado)
+    # no lo esconde ni lo convierte en falso FALLIDO.
     lineas = [ln.strip() for ln in (out or "").strip().splitlines() if ln.strip()]
-    ultima = (lineas[-1] if lineas else "").upper()
-    if ultima.startswith("VERIFICADO"):
+    veredicto = next(
+        (ln.upper() for ln in reversed(lineas[-_VEREDICTO_VENTANA:]) if _es_linea_veredicto(ln)),
+        "",
+    )
+    if veredicto.startswith("VERIFICADO"):
         return HECHO, "verificado"
     return FALLIDO, (out or "").strip()[-200:]
 
@@ -936,6 +975,23 @@ def _h_editar(step: Step, plan: Plan, repo: str) -> tuple[str, str]:
         if _sin_cambio_necesario(texto):
             return HECHO, _nota_editar(
                 "auditoría sin cambios: el repo ya cumple el criterio (sin diff, esperado)", texto
+            )
+        # Tampoco es auditoría limpia: ¿el 'done' de este paso exigía correr un comando (pytest, un
+        # script) que el carril sin target no puede correr (S3, a propósito)? Se chequea AQUÍ, no
+        # antes de comparar el disco: si el executor SÍ editó algo, la edición se aplicó igual y de
+        # nada serviría pisarla por un comentario de paso sobre pytest. La salida: reescribir el paso
+        # con un .py concreto para despachar por optimize/_dispatch_isolated (SÍ tiene shell), o
+        # separar la comprobación en un paso 'verificar' aparte (también tiene shell, sin poder
+        # editar lo que audita).
+        shell_denegado = _confesion_shell_denegado(texto)
+        if shell_denegado:
+            return FALLIDO, _nota_editar(
+                "sin shell (S3, no_shell=True): el done de este paso exige correr comandos y el "
+                f'carril editar-sin-target no lo permite — confesión: "{shell_denegado}". '
+                "Reescribe la acción mencionando un archivo .py concreto para despacharla por el "
+                "carril con shell (optimize), o divide el done en este 'editar' + un paso "
+                "'verificar' aparte.",
+                texto,
             )
         # Ni confesó un fallo ni justificó el no-cambio: ambiguo -> falso 'hecho'. FALLIDO, pero con la
         # prosa del executor en la nota para diagnosticar por qué no tocó nada (antes era un genérico).

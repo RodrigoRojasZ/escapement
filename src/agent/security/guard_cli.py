@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 # ejecutable por cualquier Python).
 _DENY_SHELL_ENV = "AGENT_DENY_SHELL"
 _DENY_WRITE_ENV = "AGENT_DENY_WRITE"
-_WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+_WRITE_TOOLS = ("Write", "Edit", "NotebookEdit")
 
 
 def main() -> int:
