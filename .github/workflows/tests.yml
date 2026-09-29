@@ -9,6 +9,10 @@
 # - `--locked`: instala exactamente uv.lock; si el lock quedó desincronizado del
 #   pyproject, el job falla en vez de resolver en silencio.
 # Validado en limpio (2026-08-26): 753 passed, 1 skipped sin escapement.toml ni data/.
+# - `uses:` fijado al SHA del commit (no al tag): un tag es mutable, y si el autor de la action es
+#   comprometido puede mover el tag a otro código sin que este archivo cambie. El comentario `# vN`
+#   es solo referencia humana. Repo público con "Require actions to be pinned to a full-length
+#   commit SHA" activo — un tag suelto rompe el run.
 
 name: tests
 
@@ -26,8 +30,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - name: Guard de publicación (sin datos confidenciales)
@@ -37,8 +41,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           python-version: "3.12"
           enable-cache: true
