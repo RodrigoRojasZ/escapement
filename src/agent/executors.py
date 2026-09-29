@@ -43,7 +43,11 @@ DENY_SHELL_ENV = "AGENT_DENY_SHELL"
 DENY_WRITE_ENV = "AGENT_DENY_WRITE"
 
 # Tools de edición de archivos de Claude Code, para el ``--disallowedTools`` de ``no_write``.
-_WRITE_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit"]
+# MultiEdit ya no existe como tool propio del CLI (se fusionó en Edit); dejarlo en la lista no
+# rompe nada, pero el CLI imprime "Permission deny rule ... matches no known tool" por cada
+# dispatch con no_write=True — ruido que además corrió la última línea del veredicto de
+# _h_verificar (ver ese fix en runner.py).
+_WRITE_TOOLS = ["Write", "Edit", "NotebookEdit"]
 
 # Observer opcional de instrumentación (R3): si está seteado, run_agent lo llama con
 # (mode, prompt, output) tras CADA dispatch completado —el sink único al executor—. Default None =
