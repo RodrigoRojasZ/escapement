@@ -1153,6 +1153,58 @@ def test_editar_sin_target_despacha_no_shell(monkeypatch):
     assert kwargs[0].get("no_shell") is True
 
 
+def test_confesion_shell_denegado_detecta_frases():
+    for txt in (
+        "Bash is disabled for this session, in subagents as well as here.",
+        "No puedo ejecutar pytest sin acceso a la terminal.",
+        "I can't run tests without Bash access.",
+        "No tengo acceso a shell en este dispatch.",
+    ):
+        assert runner._confesion_shell_denegado(txt), txt
+
+
+def test_confesion_shell_denegado_no_falso_positivo():
+    for txt in ("Edité el archivo y corrí los tests.", "Listo, todo aplicado.", ""):
+        assert not runner._confesion_shell_denegado(txt), txt
+
+
+def test_editar_sin_target_con_done_que_exige_pytest_explica_la_causa_real(monkeypatch):
+    # Regresión del gap de diseño: un paso 'editar' SIN archivo .py en la acción (el planner no
+    # mencionó ninguno) cuyo 'done' exige confirmar con pytest ("el test falla antes del fix y pasa
+    # después") no puede cumplirse en el carril sin target: ese carril despacha con no_shell=True
+    # (S3) a propósito. Antes de este fix la nota solo decía "sin efecto en disco" sin explicar POR
+    # QUÉ, y quien retomaba el plan tenía que leer runner.py/executors.py para diagnosticarlo.
+    monkeypatch.setattr(runner, "_git_status", lambda repo: "")  # sin efecto en disco (no hay shell)
+    monkeypatch.setattr(
+        runner.executors,
+        "run_agent",
+        lambda *a, **k: (
+            True,
+            "Escribí el test de regresión, pero Bash is disabled for this session, "
+            "in subagents as well as here, así que no puedo correr pytest para confirmar "
+            "que falla antes del fix y pasa después.",
+        ),
+    )
+    p = Plan(
+        "o",
+        "g",
+        [
+            Step(
+                1,
+                "corrige los hallazgos de la auditoría en los módulos afectados",
+                "editar",
+                "cada hallazgo tiene un test de regresión que falla antes del fix y pasa después",
+                [],
+            )
+        ],
+    )
+    run_plan(p, "repo", persist=False)
+    nota = p.pasos[0].nota
+    assert p.pasos[0].estado == "fallido"
+    assert "no_shell" in nota and "Bash is disabled" in nota  # causa real, no el síntoma genérico
+    assert "verificar" in nota  # apunta a la salida ya soportada por el diseño
+
+
 def test_ejecutar_conserva_shell(monkeypatch):
     # 'ejecutar' SÍ corre comandos (es su propósito): su jaula es guard (S1) + worktree (S2)
     kwargs = []

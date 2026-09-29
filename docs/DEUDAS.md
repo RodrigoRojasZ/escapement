@@ -487,6 +487,43 @@ en `test_runner.py` —el central reescribe un untracked sin renombrarlo y compr
 y el diff quedan idénticos (`h1.split("\0")[:2] == h2.split("\0")[:2]`, esa era la trampa) mientras
 la huella completa sí se mueve—; los 4 que ejercen el código nuevo fallan con el `src/` anterior.
 
+### 18. Un `editar` sin target cuyo `done` exige shell (pytest) falla sin decir por qué — ✅ cerrada (2026-09-28)
+
+**Impacto: medio · Esfuerzo: bajo** · *Registrada el 2026-09-28: hallazgo al operar un plan real
+de Harvest (deuda técnica con fixes verificados por test de regresión).*
+
+El carril sin target de `_h_editar` ([runner.py:926](../src/agent/runner.py#L926)) despacha con
+`no_shell=True` **a propósito** (S3, [ROADMAP_MEJORA_ESCAPEMENT.md](ROADMAP_MEJORA_ESCAPEMENT.md#estado-de-avance)):
+recibe acciones tanto del roadmap humano como de `reflexionar` (auto-evolución, `_insertar_pasos`),
+y el `Step` no distingue el origen — mismo `tipo="editar"`, mismo dispatch. Relajar el shell "para
+pasos del planner" relajaría igual los insertados por auto-evolución, justo la superficie que S3 (y
+la deuda #13, pasos de auto-evolución sin validar) confinó. **No es un bug de diseño: es una premisa
+de S3 que no cubre todos los `done` posibles** — un paso puede pedir legítimamente "el test de
+regresión falla antes del fix y pasa después", y confirmarlo exige `pytest`, que este carril nunca
+tiene.
+
+**Evidencia:** un paso `[editar]` sin ningún `.py` en la acción, con ese `done`, quedó `fallido` con
+la nota "sin efecto en disco: la edición no cambió ningún archivo y el executor no lo justificó" —
+la salida real del executor sí explicaba la causa ("Bash is disabled for this session, in
+subagents as well as here"), pero la nota no la citaba: para diagnosticarlo hubo que leer
+`runner.py`/`executors.py` a mano. Un operador sin ese contexto reescribiría el paso a ciegas (el
+truco que sí funciona hoy —mencionar un `.py` sin ruta real para que `_dispatch_isolated` caiga al
+`dispatch()` de todo el worktree, CON shell— es un efecto colateral de la resolución de target
+pensado para otro caso, no un carril sancionado para esto).
+
+**Arreglo aplicado:** `_confesion_shell_denegado` ([runner.py](../src/agent/runner.py)) detecta en
+la prosa del executor que le faltó Bash/PowerShell/pytest (inglés y español) y, si el carril
+sin-target no tuvo efecto en disco por eso, la nota de `FALLIDO` ahora nombra la causa real
+(`no_shell`, S3) y las dos salidas que el diseño YA soporta: reescribir la acción con un `.py`
+concreto (carril `optimize`, con shell) o separar la comprobación en un paso `verificar` aparte
+(tiene shell, sin poder editar lo que audita — deuda #12). Se descartó a propósito un
+`multi_target`/detección de origen para relajar `no_shell`: exigiría taguear la procedencia del
+paso (humano vs. auto-evolución) en el `Step`, algo que hoy no existe y que reabriría la superficie
+que #13 dejó pendiente de validar. **Verificación:** 3 tests nuevos en `test_runner.py` (detección
+de la confesión, no-falso-positivo, y la regresión completa vía `run_plan` con el `done` que exige
+pytest); sin el parche, la nota no menciona `no_shell` ni `Bash is disabled`. Suite completa:
+135 tests pasando.
+
 ---
 
 ## DX y config
