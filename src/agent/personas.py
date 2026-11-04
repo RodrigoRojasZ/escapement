@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import warnings
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -49,8 +50,15 @@ EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 _MODELO_OK = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\-\[\]]*")
 # Nombre de herramienta (``Read``, ``mcp__srv__tool``) con especificador opcional entre paréntesis
 # (``Bash(git diff:*)``): dentro del paréntesis se admiten espacios, pero no comillas, ``\``, comas,
-# paréntesis anidados ni caracteres de control.
-_TOOL_OK = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.\-*]*(?:\([^"\\(),\x00-\x1f\x7f]*\))?')
+# paréntesis anidados ni caracteres de control (C0, DEL, C1 —incluye U+0085— y U+2028/U+2029, que
+# YAML o un lector por líneas tratarían como salto de línea).
+_TOOL_OK = re.compile(
+    r'[A-Za-z0-9_][A-Za-z0-9_.\-*]*(?:\([^"\\(),\x00-\x1f\x7f-\x9f\u2028\u2029]*\))?'
+)
+# Fail-closed: si un ``tools`` declarado no valida, la persona queda con este mínimo de solo lectura
+# (y un aviso) en vez de volver a un default que puede ser "todas las herramientas". Pedir una
+# restricción y terminar con más permisos es el peor desenlace posible.
+TOOLS_MINIMAS: tuple[str, ...] = ("Read", "Grep", "Glob")
 
 
 def _model_valido(valor: str) -> bool:
@@ -60,7 +68,7 @@ def _model_valido(valor: str) -> bool:
 
 def _tools_validas(valores: tuple[str, ...]) -> bool:
     """Cada herramienta es un nombre simple con especificador ``(...)`` opcional, de una línea."""
-    return all(_TOOL_OK.fullmatch(v) is not None for v in valores)
+    return all(isinstance(v, str) and _TOOL_OK.fullmatch(v) is not None for v in valores)
 
 
 # Registro BASE: el default público, sin la config local aplicada. Úsalo como fuente pura (los
@@ -354,11 +362,12 @@ def _aplicar_overrides(
             el arranque. ``model`` (str) y ``tools`` (lista de str) admiten vacío: ``model=""``
             y ``tools=[]`` quitan la línea del frontmatter (CC vuelve a heredar / a darle todas las
             herramientas). ``effort`` (str) admite ``""`` o un valor de ``EFFORTS``; otro valor
-            se ignora. ``model`` y cada tool deben cumplir ``_MODELO_OK``/``_TOOL_OK`` (una
-            línea, sin comillas ni backslash; las tools admiten ``Nombre(especificador)``): si no, se
-            ignora el valor entero, porque inyectaría claves en el frontmatter. OJO: ignorar un
-            ``tools`` inválido deja el default de la persona, que puede ser "todas". Los tres solo
-            afectan a ``export_agents``, no al runner.
+            se ignora. ``model`` y ``effort`` no distinguen mayúsculas (se guardan en minúsculas).
+            ``model`` debe cumplir ``_MODELO_OK`` (una línea, sin caracteres de YAML); si no, se
+            ignora. ``tools`` es **fail-closed**: si se declara y no es una lista de str que
+            cumplan ``_TOOL_OK`` (las tools admiten ``Nombre(especificador)``), la persona queda
+            con ``TOOLS_MINIMAS`` (solo lectura) y se emite un ``UserWarning``, nunca con el
+            default, que puede ser "todas". Los tres solo afectan a ``export_agents``, no al runner.
 
     Returns:
         Lista nueva en el MISMO orden que ``base`` — ``select`` desempata por ese orden.
@@ -379,17 +388,28 @@ def _aplicar_overrides(
                 valor = ajuste.get(campo)
                 if isinstance(valor, (list, tuple)):
                     campos[campo] = tuple(str(x) for x in valor)
-            tools = ajuste.get("tools")
-            if isinstance(tools, (list, tuple)):
-                tupla = tuple(str(x).strip() for x in tools)
-                if _tools_validas(tupla):
+            if "tools" in ajuste:
+                tools = ajuste["tools"]
+                tupla = (
+                    tuple(x.strip() if isinstance(x, str) else x for x in tools)
+                    if isinstance(tools, (list, tuple))
+                    else None
+                )
+                if tupla is not None and _tools_validas(tupla):
                     campos["tools"] = tupla
+                else:
+                    warnings.warn(
+                        f"[personas.{p.name}] tools inválido ({tools!r}): se aplica el mínimo de "
+                        f"solo lectura {list(TOOLS_MINIMAS)}",
+                        stacklevel=2,
+                    )
+                    campos["tools"] = TOOLS_MINIMAS
             modelo = ajuste.get("model")
-            if isinstance(modelo, str) and _model_valido(modelo.strip()):
-                campos["model"] = modelo.strip()
+            if isinstance(modelo, str) and _model_valido(modelo.strip().lower()):
+                campos["model"] = modelo.strip().lower()
             effort = ajuste.get("effort")
-            if isinstance(effort, str) and effort.strip() in ("", *EFFORTS):
-                campos["effort"] = effort.strip()
+            if isinstance(effort, str) and effort.strip().lower() in ("", *EFFORTS):
+                campos["effort"] = effort.strip().lower()
         out.append(replace(p, **campos) if campos else p)
     return out
 
@@ -493,8 +513,11 @@ def export_agents(dest: Path | None = None) -> list[Path]:
             extra += f'model: "{p.model}"\n'  # comillas: "yes"/"null"/"123" siguen siendo str
         if p.effort in EFFORTS:
             extra += f"effort: {p.effort}\n"
-        if p.tools and _tools_validas(p.tools):
-            extra += f'tools: "{", ".join(p.tools)}"\n'
+        if p.tools:
+            # Fail-closed también aquí: una allowlist declarada que no valida se reemplaza por el
+            # mínimo de solo lectura, nunca se omite (omitirla = todas las herramientas).
+            tools = p.tools if _tools_validas(p.tools) else TOOLS_MINIMAS
+            extra += f'tools: "{", ".join(tools)}"\n'
         contenido = (
             f'---\nname: {p.name}\ndescription: "{desc}"\n{extra}---\n\n{p.system.strip()}\n'
         )

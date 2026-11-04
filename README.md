@@ -823,13 +823,15 @@ repos = ["mi_api"]
 | `system` | str | El system prompt del dispatch. Aquí va el dominio concreto de TU código. |
 | `description` | str | Cuándo usar el agente: frontmatter del subagente de Claude Code y auto-enrutado. |
 | `tipos` | lista de str | Tipos de paso que auto-enruta. Vacía = sale del auto-ruteo y queda como especialista asignable. |
-| `model` | str | Modelo del subagente exportado (`opus`, `sonnet`, `haiku`, `inherit` o un model ID). `""` = quita la línea: hereda el modelo de la sesión. |
-| `effort` | str | Effort del subagente exportado: `low`, `medium`, `high`, `xhigh` o `max`. `""` = hereda. Otro valor se ignora. |
-| `tools` | lista de str | Allowlist de herramientas del subagente exportado (p. ej. `["Read", "Grep", "Bash(git diff:*)"]`). **Vacía = todas** (amplía permisos). Si algún elemento no es válido (salto de línea, comillas, coma), se ignora la lista entera y queda el default de la persona, que puede ser "todas". |
+| `model` | str | Modelo del subagente exportado (`opus`, `sonnet`, `haiku`, `inherit` o un model ID; se guarda en minúsculas). `""` = quita la línea: hereda el modelo de la sesión. |
+| `effort` | str | Effort del subagente exportado: `low`, `medium`, `high`, `xhigh` o `max` (sin distinguir mayúsculas). `""` = hereda. Otro valor se ignora. |
+| `tools` | lista de str | Allowlist de herramientas del subagente exportado (p. ej. `["Read", "Grep", "Bash(git diff:*)"]`). **Vacía = todas** (amplía permisos). **Fail-closed:** si no es una lista o algún elemento no es válido (string suelto, salto de línea, comillas, coma, caracteres de control), la persona queda con `Read, Grep, Glob` y se emite un aviso. Nunca vuelve en silencio a "todas". |
 
 Lo que no declares queda en su default y el orden del registro se preserva (`select` desempata por
 él). Un nombre inexistente, una clave desconocida, un `system` vacío o un tipo equivocado se
-**ignoran en silencio**: un `escapement.toml` mal escrito degrada al default.
+**ignoran en silencio**: un `escapement.toml` mal escrito degrada al default. La excepción es
+`tools`: si está mal escrito falla cerrado (mínimo de solo lectura + aviso), porque degradar al
+default podría dar más permisos de los que pediste.
 
 #### Modelo, effort y herramientas por subagente
 
@@ -838,7 +840,10 @@ de Escapement los ignora. El registro trae un ruteo por costo/juicio: `opus`·`h
 personas donde un error sale caro (`arquitecto`, `revisor`, `seguridad`, `depurador`,
 `migraciones`), `sonnet`·`medium` para las que implementan, `sonnet`·`low` para las mecánicas
 (`documentador`, `dependencias`), y sin `Edit`/`Write` para las que solo leen o auditan (`revisor`,
-`investigador`, `seguridad`, `arquitecto`). Ajústalo en tu config sin tocar el código:
+`investigador`, `seguridad`, `arquitecto`). Ojo: `tools` es una allowlist, así que esas cuatro
+personas también pierden lo que no está en su lista: herramientas MCP, `Agent` y, salvo `arquitecto`,
+`WebFetch`/`WebSearch`. Si un flujo las necesita, agrégalas en su `tools` o usa `tools = []`.
+Ajústalo en tu config sin tocar el código:
 
 ```toml
 [personas.scraping]

@@ -272,13 +272,55 @@ def test_override_vacios_quitan_model_effort_tools():
     assert (p.model, p.effort, p.tools) == ("", "", ())
 
 
-def test_override_effort_invalido_o_tipo_equivocado_se_ignora():
+def test_override_effort_invalido_o_model_tipo_equivocado_se_ignora():
     base = personas.by_name("revisor")
     reg = personas._aplicar_overrides(
-        personas._PERSONAS_BASE, {"revisor": {"effort": "altisimo", "model": 3, "tools": "Read"}}
+        personas._PERSONAS_BASE, {"revisor": {"effort": "altisimo", "model": 3}}
     )
     p = next(x for x in reg if x.name == "revisor")
     assert (p.model, p.effort, p.tools) == (base.model, base.effort, base.tools)
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [
+        "Read, Grep",  # string (formato nativo de CC) en vez de lista
+        ["Read", "Bash(rm a, b)"],  # un elemento inválido invalida la lista entera
+        [1, "Read"],  # elemento que no es str
+        None,
+    ],
+)
+def test_tools_invalido_falla_cerrado_con_aviso(tools):
+    # scraping no trae tools en la base: sin fail-closed quedaría con TODAS las herramientas.
+    with pytest.warns(UserWarning, match=r"personas\.scraping"):
+        reg = personas._aplicar_overrides(personas._PERSONAS_BASE, {"scraping": {"tools": tools}})
+    assert next(x for x in reg if x.name == "scraping").tools == personas.TOOLS_MINIMAS
+
+
+def test_tools_fail_closed_llega_al_export(tmp_path, monkeypatch):
+    with pytest.warns(UserWarning):
+        reg = personas._aplicar_overrides(
+            personas._PERSONAS_BASE, {"scraping": {"tools": "Read, Grep"}}
+        )
+    monkeypatch.setattr(personas, "PERSONAS", reg)
+    personas.export_agents(tmp_path)
+    assert '\ntools: "Read, Grep, Glob"\n' in (tmp_path / "scraping.md").read_text(encoding="utf-8")
+
+
+def test_override_strip_y_minusculas():
+    reg = personas._aplicar_overrides(
+        personas._PERSONAS_BASE,
+        {"revisor": {"model": " Opus ", "effort": " HIGH ", "tools": [" Read ", "Grep"]}},
+    )
+    p = next(x for x in reg if x.name == "revisor")
+    assert (p.model, p.effort, p.tools) == ("opus", "high", ("Read", "Grep"))
+
+
+def test_registro_base_model_y_tools_validos():
+    # Si una allowlist del registro no validara, el export la cambiaría por el mínimo en silencio.
+    for p in personas._PERSONAS_BASE:
+        assert personas._model_valido(p.model), p.name
+        assert personas._tools_validas(p.tools), p.name
 
 
 def test_override_model_no_toca_el_system_del_runner():
@@ -288,21 +330,28 @@ def test_override_model_no_toca_el_system_del_runner():
     assert (p.system, p.tipos, p.repos) == (base.system, base.tipos, base.repos)
 
 
+@pytest.mark.parametrize("model", ["opus\npermissionMode: bypassPermissions", "opus # comentario"])
+def test_model_que_inyectaria_frontmatter_se_ignora(model):
+    base = personas.by_name("revisor")
+    reg = personas._aplicar_overrides(personas._PERSONAS_BASE, {"revisor": {"model": model}})
+    assert next(x for x in reg if x.name == "revisor").model == base.model
+
+
 @pytest.mark.parametrize(
-    "ajuste",
+    "tools",
     [
-        {"model": "opus\npermissionMode: bypassPermissions"},
-        {"model": "opus # comentario"},
-        {"tools": ["Read\nhooks: x"]},
-        {"tools": ["Read, Write"]},
-        {"tools": ["Read", ""]},
+        ["Read\nhooks: x"],
+        ["Read, Write"],
+        ["Read", ""],
+        ["Bash(a\x90b)"],  # C1: rompe yaml.safe_load
+        ["Bash(a\x85b)"],  # NEL
+        ["Bash(a\u2028b)"],  # separador de línea Unicode
     ],
 )
-def test_override_que_inyectaria_frontmatter_se_ignora(ajuste):
-    base = personas.by_name("revisor")
-    reg = personas._aplicar_overrides(personas._PERSONAS_BASE, {"revisor": ajuste})
-    p = next(x for x in reg if x.name == "revisor")
-    assert (p.model, p.tools) == (base.model, base.tools)
+def test_tools_que_inyectaria_frontmatter_falla_cerrado(tools):
+    with pytest.warns(UserWarning):
+        reg = personas._aplicar_overrides(personas._PERSONAS_BASE, {"revisor": {"tools": tools}})
+    assert next(x for x in reg if x.name == "revisor").tools == personas.TOOLS_MINIMAS
 
 
 def test_export_no_emite_valores_invalidos_aunque_vengan_del_codigo(tmp_path, monkeypatch):
@@ -317,8 +366,9 @@ def test_export_no_emite_valores_invalidos_aunque_vengan_del_codigo(tmp_path, mo
     )
     monkeypatch.setattr(personas, "PERSONAS", [p])
     personas.export_agents(tmp_path)
+    # model/effort inválidos se omiten; tools inválido falla cerrado al mínimo de solo lectura.
     assert (tmp_path / "x.md").read_text(encoding="utf-8") == (
-        '---\nname: x\ndescription: "Para X."\n---\n\nEres X.\n'
+        '---\nname: x\ndescription: "Para X."\ntools: "Read, Grep, Glob"\n---\n\nEres X.\n'
     )
 
 
@@ -339,12 +389,12 @@ def test_model_ids_y_tools_legitimos_pasan():
 
 @pytest.mark.parametrize(
     "tools",
-    [["Read:"], ['Bash(echo "x")'], ["Bash(a\b)"], ["Bash(a, b)"], ["Bash((x))"]],
+    [["Read:"], ['Bash(echo "x")'], ["Bash(a\\b)"], ["Bash(a, b)"], ["Bash((x))"]],
 )
-def test_tools_que_romperian_el_yaml_se_ignoran(tools):
-    base = personas.by_name("revisor")
-    reg = personas._aplicar_overrides(personas._PERSONAS_BASE, {"revisor": {"tools": tools}})
-    assert next(x for x in reg if x.name == "revisor").tools == base.tools
+def test_tools_que_romperian_el_yaml_fallan_cerrado(tools):
+    with pytest.warns(UserWarning):
+        reg = personas._aplicar_overrides(personas._PERSONAS_BASE, {"revisor": {"tools": tools}})
+    assert next(x for x in reg if x.name == "revisor").tools == personas.TOOLS_MINIMAS
 
 
 def test_tools_con_especificador_bash_pasan_y_se_exportan(tmp_path, monkeypatch):
