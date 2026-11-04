@@ -11,6 +11,8 @@ Personas al registro, o ajusta las de aquí desde la tabla [personas] de escapem
 from __future__ import annotations
 
 import os
+import re
+import warnings
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -21,7 +23,11 @@ from agent import config
 class Persona:
     """Un agente especializado. Doble uso: ``system`` se antepone al dispatch del runner cuando
     ``tipos`` matchea el paso, y TODAS las personas se exportan como subagentes de Claude Code
-    (``.claude/agents/*.md``). ``description`` = cuándo usarlo (frontmatter de CC + auto-enrutado)."""
+    (``.claude/agents/*.md``). ``description`` = cuándo usarlo (frontmatter de CC + auto-enrutado).
+
+    ``model``, ``effort`` y ``tools`` solo viajan al frontmatter del subagente exportado: el runner
+    de Escapement los ignora (su modelo lo decide su propia config). Vacío = no se emite la línea y
+    Claude Code aplica su default (hereda el modelo/effort de la sesión, todas las herramientas)."""
 
     name: str
     system: str
@@ -30,6 +36,39 @@ class Persona:
         str, ...
     ] = ()  # tipos de paso del runner; vacío = solo subagente de CC (no auto-ruteo)
     repos: tuple[str, ...] = ()  # repos donde aplica; vacío = cualquiera
+    model: str = ""  # alias de CC (opus/sonnet/haiku/inherit) o model ID; "" = hereda
+    effort: str = ""  # uno de EFFORTS; "" = hereda
+    tools: tuple[str, ...] = ()  # allowlist de herramientas de CC; vacío = todas
+
+
+# Niveles de effort que acepta el frontmatter de un subagente de Claude Code.
+EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+
+# model/tools van en una línea del frontmatter YAML, entre comillas dobles: un salto de línea en el
+# valor inyectaría claves arbitrarias (p.ej. ``permissionMode: bypassPermissions``) y un ``"`` o
+# ``\`` rompería el string. Solo se aceptan valores con este alfabeto; lo demás se descarta.
+_MODELO_OK = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\-\[\]]*")
+# Nombre de herramienta (``Read``, ``mcp__srv__tool``) con especificador opcional entre paréntesis
+# (``Bash(git diff:*)``): dentro del paréntesis se admiten espacios, pero no comillas, ``\``, comas,
+# paréntesis anidados ni caracteres de control (C0, DEL, C1 —incluye U+0085— y U+2028/U+2029, que
+# YAML o un lector por líneas tratarían como salto de línea).
+_TOOL_OK = re.compile(
+    r'[A-Za-z0-9_][A-Za-z0-9_.\-*]*(?:\([^"\\(),\x00-\x1f\x7f-\x9f\u2028\u2029]*\))?'
+)
+# Fail-closed: si un ``tools`` declarado no valida, la persona queda con este mínimo de solo lectura
+# (y un aviso) en vez de volver a un default que puede ser "todas las herramientas". Pedir una
+# restricción y terminar con más permisos es el peor desenlace posible.
+TOOLS_MINIMAS: tuple[str, ...] = ("Read", "Grep", "Glob")
+
+
+def _model_valido(valor: str) -> bool:
+    """``""`` (hereda) o un alias/model ID de una sola línea, sin caracteres de YAML."""
+    return valor == "" or _MODELO_OK.fullmatch(valor) is not None
+
+
+def _tools_validas(valores: tuple[str, ...]) -> bool:
+    """Cada herramienta es un nombre simple con especificador ``(...)`` opcional, de una línea."""
+    return all(isinstance(v, str) and _TOOL_OK.fullmatch(v) is not None for v in valores)
 
 
 # Registro BASE: el default público, sin la config local aplicada. Úsalo como fuente pura (los
@@ -47,6 +86,9 @@ _PERSONAS_BASE: list[Persona] = [
         description="Explora un repo o subsistema y mapea arquitectura, flujos y gotchas con "
         "archivo:línea. Úsalo para entender código antes de tocarlo.",
         tipos=("investigar",),
+        model="sonnet",
+        effort="medium",
+        tools=("Read", "Grep", "Glob", "Bash"),
     ),
     Persona(
         name="backend-app",
@@ -62,6 +104,8 @@ _PERSONAS_BASE: list[Persona] = [
         "para un repo de API o servicio.",
         tipos=("editar", "crear", "ejecutar"),
         repos=("backend",),
+        model="sonnet",
+        effort="medium",
     ),
     Persona(
         name="scraping",
@@ -77,6 +121,8 @@ _PERSONAS_BASE: list[Persona] = [
         "selectores auto-reparables). Úsalo para un repo de extracción.",
         tipos=("editar", "crear", "ejecutar"),
         repos=("scraper",),
+        model="sonnet",
+        effort="medium",
     ),
     Persona(
         name="revisor",
@@ -90,6 +136,9 @@ _PERSONAS_BASE: list[Persona] = [
         description="Revisión escéptica de código y verificación con evidencia. Úsalo para "
         "comprobar que algo cumple su criterio o revisar un diff.",
         tipos=("verificar",),
+        model="opus",
+        effort="high",
+        tools=("Read", "Grep", "Glob", "Bash"),
     ),
     # --- Especialistas de dominio: subagentes de CC invocables a mano (no auto-enrutan en el runner). ---
     Persona(
@@ -104,6 +153,9 @@ _PERSONAS_BASE: list[Persona] = [
         "primeros pasos accionables.",
         description="Diseño y decisiones de rumbo/arquitectura evaluando trade-offs. Úsalo cuando "
         "haya que elegir un enfoque o estructurar una solución.",
+        model="opus",
+        effort="high",
+        tools=("Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch"),
     ),
     Persona(
         name="datos",
@@ -117,6 +169,8 @@ _PERSONAS_BASE: list[Persona] = [
         "escritura la aprueba y ejecuta un humano.",
         description="Bases de datos: queries, esquemas, índices, migraciones (MySQL/Redis). Úsalo "
         "para trabajo de DB.",
+        model="sonnet",
+        effort="medium",
     ),
     Persona(
         name="devops",
@@ -129,6 +183,8 @@ _PERSONAS_BASE: list[Persona] = [
         "forma de deshacerlo no se aplica.",
         description="Infraestructura, contenedores, Azure, CI/CD y deploy. Úsalo para Docker, "
         "pipelines o despliegues.",
+        model="sonnet",
+        effort="medium",
     ),
     Persona(
         name="seguridad",
@@ -141,6 +197,9 @@ _PERSONAS_BASE: list[Persona] = [
         "explotable del teórico y lo dices. Al arreglar, no introduces regresiones de seguridad.",
         description="Revisión de seguridad: secretos, auth, superficies de ataque, riesgos. Úsalo "
         "para auditar seguridad o revisar manejo de credenciales.",
+        model="opus",
+        effort="high",
+        tools=("Read", "Grep", "Glob", "Bash"),
     ),
     Persona(
         name="ingeniero",
@@ -156,6 +215,8 @@ _PERSONAS_BASE: list[Persona] = [
         "aplica (p.ej. el propio repo de Escapement). Úsalo para editar o crear código sin dominio "
         "específico.",
         tipos=("editar", "crear", "ejecutar"),
+        model="sonnet",
+        effort="medium",
     ),
     Persona(
         name="tester",
@@ -169,6 +230,8 @@ _PERSONAS_BASE: list[Persona] = [
         "tautológicos ni tests que pasan pase lo que pase.",
         description="Diseño y generación de tests aislados (unit, edge cases) sin Chrome/DB/red. "
         "Úsalo para cubrir código nuevo o subir cobertura.",
+        model="sonnet",
+        effort="medium",
     ),
     Persona(
         name="refactor",
@@ -182,6 +245,8 @@ _PERSONAS_BASE: list[Persona] = [
         "pidió.",
         description="Refactor que preserva el comportamiento observable, con comprobación cruzada. "
         "Úsalo para limpiar o reestructurar código sin cambiar su funcionalidad.",
+        model="sonnet",
+        effort="medium",
     ),
     Persona(
         name="optimizador",
@@ -195,6 +260,8 @@ _PERSONAS_BASE: list[Persona] = [
         "(memoria vs CPU, legibilidad vs velocidad).",
         description="Optimización de rendimiento guiada por mediciones (hot paths, complejidad, "
         "memoria). Úsalo cuando algo es lento y hay que acelerarlo sin romperlo.",
+        model="sonnet",
+        effort="medium",
     ),
     Persona(
         name="depurador",
@@ -207,6 +274,8 @@ _PERSONAS_BASE: list[Persona] = [
         "el que lo habría cazado.",
         description="Debugging sistemático: repro mínima, causa raíz por bisección, fix mínimo. "
         "Úsalo para diagnosticar un bug o un comportamiento inesperado.",
+        model="opus",
+        effort="high",
     ),
     Persona(
         name="documentador",
@@ -219,6 +288,8 @@ _PERSONAS_BASE: list[Persona] = [
         "y su contrato no coinciden, lo señalas en vez de maquillarlo.",
         description="Documentación técnica fiel al código (README, docstrings, guías) sin tocar la "
         "lógica. Úsalo para documentar una API o un flujo.",
+        model="sonnet",
+        effort="low",
     ),
     Persona(
         name="dependencias",
@@ -231,6 +302,8 @@ _PERSONAS_BASE: list[Persona] = [
         "una que no te puede comprometer.",
         description="Auditoría de dependencias: versiones, licencias, supply chain, deps muertas. "
         "Úsalo para revisar o limpiar requirements/pyproject.",
+        model="sonnet",
+        effort="low",
     ),
     Persona(
         name="migraciones",
@@ -243,6 +316,8 @@ _PERSONAS_BASE: list[Persona] = [
         "un humano. Un plan sin forma de deshacerlo no está terminado.",
         description="Planeación de migraciones de esquema/datos seguras y reversibles (sin ejecutar "
         "SQL destructivo). Úsalo para diseñar un cambio de schema.",
+        model="opus",
+        effort="high",
     ),
     Persona(
         name="frontend",
@@ -253,6 +328,8 @@ _PERSONAS_BASE: list[Persona] = [
         "con el backend. Cuidas los estados de carga, error y vacío, y las condiciones de carrera de "
         "datos async. No añades librerías si la plataforma o el patrón existente ya resuelve el caso.",
         description="Desarrollo frontend (React SPA, TS, UI/estado). Úsalo para la interfaz web.",
+        model="sonnet",
+        effort="medium",
     ),
 ]
 # Nota: los pasos 'memoria' y 'reflexionar' ya llevan su propio system especializado en el runner
@@ -282,7 +359,15 @@ def _aplicar_overrides(
             ``tipos=[]`` vuelve especialista a la persona y ``repos=[]`` la vuelve genérica). Se
             ignoran en silencio las claves desconocidas, los nombres de persona inexistentes y los
             valores del tipo equivocado: un escapement.toml mal escrito degrada al default, no rompe
-            el arranque.
+            el arranque. ``model`` (str) y ``tools`` (lista de str) admiten vacío: ``model=""``
+            y ``tools=[]`` quitan la línea del frontmatter (CC vuelve a heredar / a darle todas las
+            herramientas). ``effort`` (str) admite ``""`` o un valor de ``EFFORTS``; otro valor
+            se ignora. ``model`` y ``effort`` no distinguen mayúsculas (se guardan en minúsculas).
+            ``model`` debe cumplir ``_MODELO_OK`` (una línea, sin caracteres de YAML); si no, se
+            ignora. ``tools`` es **fail-closed**: si se declara y no es una lista de str que
+            cumplan ``_TOOL_OK`` (las tools admiten ``Nombre(especificador)``), la persona queda
+            con ``TOOLS_MINIMAS`` (solo lectura) y se emite un ``UserWarning``, nunca con el
+            default, que puede ser "todas". Los tres solo afectan a ``export_agents``, no al runner.
 
     Returns:
         Lista nueva en el MISMO orden que ``base`` — ``select`` desempata por ese orden.
@@ -303,6 +388,28 @@ def _aplicar_overrides(
                 valor = ajuste.get(campo)
                 if isinstance(valor, (list, tuple)):
                     campos[campo] = tuple(str(x) for x in valor)
+            if "tools" in ajuste:
+                tools = ajuste["tools"]
+                tupla = (
+                    tuple(x.strip() if isinstance(x, str) else x for x in tools)
+                    if isinstance(tools, (list, tuple))
+                    else None
+                )
+                if tupla is not None and _tools_validas(tupla):
+                    campos["tools"] = tupla
+                else:
+                    warnings.warn(
+                        f"[personas.{p.name}] tools inválido ({tools!r}): se aplica el mínimo de "
+                        f"solo lectura {list(TOOLS_MINIMAS)}",
+                        stacklevel=2,
+                    )
+                    campos["tools"] = TOOLS_MINIMAS
+            modelo = ajuste.get("model")
+            if isinstance(modelo, str) and _model_valido(modelo.strip().lower()):
+                campos["model"] = modelo.strip().lower()
+            effort = ajuste.get("effort")
+            if isinstance(effort, str) and effort.strip().lower() in ("", *EFFORTS):
+                campos["effort"] = effort.strip().lower()
         out.append(replace(p, **campos) if campos else p)
     return out
 
@@ -388,15 +495,32 @@ def export_agents(dest: Path | None = None) -> list[Path]:
     """Escribe cada persona como subagente de Claude Code (``<dest>/<name>.md``).
 
     Formato de CC (verificado): frontmatter ``name`` + ``description`` (requeridos) y el body = el
-    system prompt. Por defecto en ``~/.claude/agents`` (global: invocables en TODO proyecto de CC).
-    UNA fuente de verdad (``PERSONAS``) → los subagentes; re-córrelo tras editar el registro.
+    system prompt. ``model``, ``effort`` y ``tools`` se emiten solo si la persona los declara (no
+    vacíos); si no, CC aplica su default. Por defecto en ``~/.claude/agents`` (global: invocables en
+    TODO proyecto de CC). UNA fuente de verdad (``PERSONAS``) → los subagentes; re-córrelo tras
+    editar el registro. Solo escribe los ``<name>.md`` de las personas: un subagente hecho a mano en
+    ``dest`` con otro nombre no se toca.
     """
     dest = dest or (config.HOME / ".claude" / "agents")
     dest.mkdir(parents=True, exist_ok=True)
     escritos: list[Path] = []
     for p in PERSONAS:
         desc = " ".join(p.description.split()).replace('"', "'")  # una línea, sin romper el quote
-        contenido = f'---\nname: {p.name}\ndescription: "{desc}"\n---\n\n{p.system.strip()}\n'
+        # Defensa en profundidad: aunque una Persona se construya sin pasar por los overrides, un
+        # valor que no valida no llega al frontmatter (se omite la línea = default de CC).
+        extra = ""
+        if p.model and _model_valido(p.model):
+            extra += f'model: "{p.model}"\n'  # comillas: "yes"/"null"/"123" siguen siendo str
+        if p.effort in EFFORTS:
+            extra += f"effort: {p.effort}\n"
+        if p.tools:
+            # Fail-closed también aquí: una allowlist declarada que no valida se reemplaza por el
+            # mínimo de solo lectura, nunca se omite (omitirla = todas las herramientas).
+            tools = p.tools if _tools_validas(p.tools) else TOOLS_MINIMAS
+            extra += f'tools: "{", ".join(tools)}"\n'
+        contenido = (
+            f'---\nname: {p.name}\ndescription: "{desc}"\n{extra}---\n\n{p.system.strip()}\n'
+        )
         path = dest / f"{p.name}.md"
         path.write_text(contenido, encoding="utf-8")
         escritos.append(path)

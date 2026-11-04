@@ -1,6 +1,6 @@
 [project]
 name = "agent"
-version = "0.18.0"
+version = "0.19.0"
 description = "Asistente personal tipo Jarvis sobre el Claude Agent SDK: recall cross-proyecto, memoria y operacion controlada del equipo."
 requires-python = ">=3.10"
 dependencies = [
