@@ -823,10 +823,36 @@ repos = ["mi_api"]
 | `system` | str | El system prompt del dispatch. Aquí va el dominio concreto de TU código. |
 | `description` | str | Cuándo usar el agente: frontmatter del subagente de Claude Code y auto-enrutado. |
 | `tipos` | lista de str | Tipos de paso que auto-enruta. Vacía = sale del auto-ruteo y queda como especialista asignable. |
+| `model` | str | Modelo del subagente exportado (`opus`, `sonnet`, `haiku`, `inherit` o un model ID). `""` = quita la línea: hereda el modelo de la sesión. |
+| `effort` | str | Effort del subagente exportado: `low`, `medium`, `high`, `xhigh` o `max`. `""` = hereda. Otro valor se ignora. |
+| `tools` | lista de str | Allowlist de herramientas del subagente exportado (p. ej. `["Read", "Grep", "Bash(git diff:*)"]`). **Vacía = todas** (amplía permisos). Si algún elemento no es válido (salto de línea, comillas, coma), se ignora la lista entera y queda el default de la persona, que puede ser "todas". |
 
 Lo que no declares queda en su default y el orden del registro se preserva (`select` desempata por
 él). Un nombre inexistente, una clave desconocida, un `system` vacío o un tipo equivocado se
 **ignoran en silencio**: un `escapement.toml` mal escrito degrada al default.
+
+#### Modelo, effort y herramientas por subagente
+
+`model`, `effort` y `tools` **solo viajan al frontmatter** que escribe `escapement agentes`; el runner
+de Escapement los ignora. El registro trae un ruteo por costo/juicio: `opus`·`high` para las
+personas donde un error sale caro (`arquitecto`, `revisor`, `seguridad`, `depurador`,
+`migraciones`), `sonnet`·`medium` para las que implementan, `sonnet`·`low` para las mecánicas
+(`documentador`, `dependencias`), y sin `Edit`/`Write` para las que solo leen o auditan (`revisor`,
+`investigador`, `seguridad`, `arquitecto`). Ajústalo en tu config sin tocar el código:
+
+```toml
+[personas.scraping]
+model = "opus"          # este repo merece más juicio que el default
+effort = "high"
+
+[personas.revisor]
+model = ""              # "" = vuelve a heredar el modelo de la sesión de Claude Code
+tools = []              # [] = todas las herramientas
+```
+
+Una persona sin estos campos se exporta exactamente como antes (solo `name` + `description`). El
+export solo reescribe `<persona>.md`: un subagente hecho a mano en el mismo directorio con otro nombre
+no se toca. Ojo: quitar `Edit`/`Write` no hace a un agente de solo lectura si conserva `Bash`.
 
 ---
 

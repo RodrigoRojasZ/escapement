@@ -148,6 +148,37 @@ def test_export_agents_formato_cc(tmp_path):
     assert (tmp_path / "seguridad.md").exists() and (tmp_path / "arquitecto.md").exists()
 
 
+def test_export_agents_emite_model_effort_tools(tmp_path):
+    personas.export_agents(tmp_path)
+    inv = (tmp_path / "investigador.md").read_text(encoding="utf-8")
+    cabecera = inv.split("\n---\n", 1)[0]  # solo el frontmatter
+    assert '\nmodel: "sonnet"\neffort: medium\ntools: "Read, Grep, Glob, Bash"' in cabecera
+    rev = (tmp_path / "revisor.md").read_text(encoding="utf-8")
+    assert '\nmodel: "opus"\neffort: high\n' in rev
+
+
+def test_export_agents_omite_campos_vacios(tmp_path, monkeypatch):
+    # Sin model/effort/tools el frontmatter queda idéntico al formato previo (backward compatible).
+    p = personas.Persona(name="x", system="Eres X.", description="Para X.")
+    monkeypatch.setattr(personas, "PERSONAS", [p])
+    personas.export_agents(tmp_path)
+    assert (tmp_path / "x.md").read_text(encoding="utf-8") == (
+        '---\nname: x\ndescription: "Para X."\n---\n\nEres X.\n'
+    )
+
+
+def test_export_agents_no_toca_subagentes_ajenos(tmp_path):
+    ajeno = tmp_path / "hecho-a-mano.md"
+    ajeno.write_text("intacto", encoding="utf-8")
+    personas.export_agents(tmp_path)
+    assert ajeno.read_text(encoding="utf-8") == "intacto"
+
+
+def test_registro_base_efforts_validos():
+    for p in personas._PERSONAS_BASE:
+        assert p.effort in ("", *personas.EFFORTS), p.name
+
+
 # --- Overrides locales desde [personas] de escapement.toml -------------------------
 
 
@@ -221,3 +252,117 @@ def test_override_preserva_el_orden_del_registro():
     # select() desempata por orden de lista: si el override lo alterara, cambiaría el ruteo.
     reg = personas._aplicar_overrides(personas._PERSONAS_BASE, {"scraping": {"repos": ["z"]}})
     assert [p.name for p in reg] == [p.name for p in personas.PERSONAS]
+
+
+def test_override_model_effort_tools():
+    reg = personas._aplicar_overrides(
+        personas._PERSONAS_BASE,
+        {"scraping": {"model": "haiku", "effort": "low", "tools": ["Read", "Grep"]}},
+    )
+    p = next(x for x in reg if x.name == "scraping")
+    assert (p.model, p.effort, p.tools) == ("haiku", "low", ("Read", "Grep"))
+
+
+def test_override_vacios_quitan_model_effort_tools():
+    # "" y [] son significativos: vuelven a heredar de la sesión de CC / dar todas las tools.
+    reg = personas._aplicar_overrides(
+        personas._PERSONAS_BASE, {"revisor": {"model": "", "effort": "", "tools": []}}
+    )
+    p = next(x for x in reg if x.name == "revisor")
+    assert (p.model, p.effort, p.tools) == ("", "", ())
+
+
+def test_override_effort_invalido_o_tipo_equivocado_se_ignora():
+    base = personas.by_name("revisor")
+    reg = personas._aplicar_overrides(
+        personas._PERSONAS_BASE, {"revisor": {"effort": "altisimo", "model": 3, "tools": "Read"}}
+    )
+    p = next(x for x in reg if x.name == "revisor")
+    assert (p.model, p.effort, p.tools) == (base.model, base.effort, base.tools)
+
+
+def test_override_model_no_toca_el_system_del_runner():
+    reg = personas._aplicar_overrides(personas._PERSONAS_BASE, {"scraping": {"model": "haiku"}})
+    p = next(x for x in reg if x.name == "scraping")
+    base = personas.by_name("scraping")
+    assert (p.system, p.tipos, p.repos) == (base.system, base.tipos, base.repos)
+
+
+@pytest.mark.parametrize(
+    "ajuste",
+    [
+        {"model": "opus\npermissionMode: bypassPermissions"},
+        {"model": "opus # comentario"},
+        {"tools": ["Read\nhooks: x"]},
+        {"tools": ["Read, Write"]},
+        {"tools": ["Read", ""]},
+    ],
+)
+def test_override_que_inyectaria_frontmatter_se_ignora(ajuste):
+    base = personas.by_name("revisor")
+    reg = personas._aplicar_overrides(personas._PERSONAS_BASE, {"revisor": ajuste})
+    p = next(x for x in reg if x.name == "revisor")
+    assert (p.model, p.tools) == (base.model, base.tools)
+
+
+def test_export_no_emite_valores_invalidos_aunque_vengan_del_codigo(tmp_path, monkeypatch):
+    # Defensa en profundidad: una Persona armada a mano (sin overrides) tampoco inyecta claves.
+    p = personas.Persona(
+        name="x",
+        system="Eres X.",
+        description="Para X.",
+        model="opus\npermissionMode: bypassPermissions",
+        effort="high\nhooks: x",
+        tools=("Read\nmcpServers: y",),
+    )
+    monkeypatch.setattr(personas, "PERSONAS", [p])
+    personas.export_agents(tmp_path)
+    assert (tmp_path / "x.md").read_text(encoding="utf-8") == (
+        '---\nname: x\ndescription: "Para X."\n---\n\nEres X.\n'
+    )
+
+
+def test_model_ids_y_tools_legitimos_pasan():
+    reg = personas._aplicar_overrides(
+        personas._PERSONAS_BASE,
+        {
+            "revisor": {
+                "model": "claude-sonnet-5-5[1m]",
+                "tools": ["Read", "mcp__github__get_pr", "WebFetch"],
+            }
+        },
+    )
+    p = next(x for x in reg if x.name == "revisor")
+    assert p.model == "claude-sonnet-5-5[1m]"
+    assert p.tools == ("Read", "mcp__github__get_pr", "WebFetch")
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [["Read:"], ['Bash(echo "x")'], ["Bash(a\b)"], ["Bash(a, b)"], ["Bash((x))"]],
+)
+def test_tools_que_romperian_el_yaml_se_ignoran(tools):
+    base = personas.by_name("revisor")
+    reg = personas._aplicar_overrides(personas._PERSONAS_BASE, {"revisor": {"tools": tools}})
+    assert next(x for x in reg if x.name == "revisor").tools == base.tools
+
+
+def test_tools_con_especificador_bash_pasan_y_se_exportan(tmp_path, monkeypatch):
+    reg = personas._aplicar_overrides(
+        personas._PERSONAS_BASE, {"scraping": {"tools": ["Read", "Bash(git diff:*)"]}}
+    )
+    p = next(x for x in reg if x.name == "scraping")
+    assert p.tools == ("Read", "Bash(git diff:*)")
+    monkeypatch.setattr(personas, "PERSONAS", [p])
+    personas.export_agents(tmp_path)
+    assert '\ntools: "Read, Bash(git diff:*)"\n' in (tmp_path / "scraping.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_model_ambiguo_en_yaml_se_exporta_entre_comillas(tmp_path, monkeypatch):
+    # Sin comillas, YAML leería `yes` como bool y `123` como int.
+    p = personas.Persona(name="x", system="Eres X.", description="Para X.", model="yes")
+    monkeypatch.setattr(personas, "PERSONAS", [p])
+    personas.export_agents(tmp_path)
+    assert '\nmodel: "yes"\n' in (tmp_path / "x.md").read_text(encoding="utf-8")
